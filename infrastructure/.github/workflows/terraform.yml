@@ -1,0 +1,89 @@
+name: Terraform
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'infrastructure/**'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'infrastructure/**'
+  workflow_dispatch:
+
+env:
+  # Переменная для управления развертыванием инфраструктуры
+  # Измените значение на 'false', чтобы отключить развертывание
+  # 'true' - развертывание включено, 'false' - развертывание отключено
+  UP_INF: 'true'
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Check deployment flag
+        id: check_flag
+        run: |
+          UP_INF_VALUE="${{ env.UP_INF }}"
+          if [ "$UP_INF_VALUE" = "true" ]; then
+            echo "Deployment enabled: Up_inf = true"
+            echo "deploy=true" >> $GITHUB_OUTPUT
+          else
+            echo "Deployment disabled: Up_inf = false"
+            echo "deploy=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Setup Terraform
+        if: steps.check_flag.outputs.deploy == 'true'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.0
+      
+      - name: Configure Yandex Cloud credentials
+        if: steps.check_flag.outputs.deploy == 'true'
+        run: |
+          mkdir -p ~/.config
+          echo "${{ secrets.YC_SERVICE_ACCOUNT_KEY }}" > ~/.config/yc_sa_key.json
+          chmod 600 ~/.config/yc_sa_key.json
+          echo "YC_SERVICE_ACCOUNT_KEY_FILE=$HOME/.config/yc_sa_key.json" >> $GITHUB_ENV
+      
+      - name: Configure Terraform backend credentials
+        if: steps.check_flag.outputs.deploy == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+      
+      - name: Terraform Init
+        if: steps.check_flag.outputs.deploy == 'true'
+        working-directory: ./infrastructure
+        run: terraform init
+      
+      - name: Terraform Validate
+        if: steps.check_flag.outputs.deploy == 'true'
+        working-directory: ./infrastructure
+        run: terraform validate
+      
+      - name: Terraform Plan
+        if: steps.check_flag.outputs.deploy == 'true'
+        working-directory: ./infrastructure
+        run: terraform plan -no-color
+        continue-on-error: true
+      
+      - name: Terraform Apply
+        if: steps.check_flag.outputs.deploy == 'true' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        working-directory: ./infrastructure
+        run: terraform apply -auto-approve -no-color
+      
+      - name: Deployment skipped
+        if: steps.check_flag.outputs.deploy == 'false'
+        run: |
+          echo "::notice::Развертывание инфраструктуры отключено (Up_inf = false)"
+          echo "Для включения развертывания установите переменную Up_inf в true"
+

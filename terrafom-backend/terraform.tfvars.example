@@ -1,0 +1,23 @@
+# Yandex Cloud конфигурация
+# Имя бакета генерируется автоматически из статической части "diplom-kh" и даты/времени
+# Формат: diplom-kh-YYYYMMDD-HHMMSS
+# Если необходимо указать имя вручную, раскомментируйте и измените следующую строку:
+# bucket_name          = "my-terraform-state-bucket"
+# 
+# При автоматическом создании через manage-backend.sh имя будет сгенерировано автоматически
+
+service_account_name = "terraform-state-sa"
+folder_id            = "b1gxxxxxxxxxxxxxxxx"
+cloud_id             = "b1gxxxxxxxxxxxxxxxx"  # Опционально
+zone                 = "ru-central1-a"
+environment          = "dev"
+project_name         = "diplom"
+state_retention_days = 90
+
+# Примечание: 
+# - Для аутентификации провайдера используется файл ключа сервисного аккаунта:
+#   ~/.authorized_key.json
+# 
+# - Сервисный аккаунт и Static Keys будут созданы автоматически через Terraform
+# - Учетные данные будут сохранены в файл credentials.env после развертывания
+# - Имя бакета автоматически генерируется скриптом manage-backend.sh при создании terraform.tfvars
