@@ -45,9 +45,11 @@ jobs:
       
       - name: Configure Yandex Cloud credentials
         if: steps.check_flag.outputs.deploy == 'true'
+        env:
+          YC_SERVICE_ACCOUNT_KEY: ${{ secrets.YC_SERVICE_ACCOUNT_KEY }}
         run: |
           mkdir -p ~/.config
-          echo "${{ secrets.YC_SERVICE_ACCOUNT_KEY }}" > ~/.config/yc_sa_key.json
+          printf '%s\n' "$YC_SERVICE_ACCOUNT_KEY" > ~/.config/yc_sa_key.json
           chmod 600 ~/.config/yc_sa_key.json
           echo "YC_SERVICE_ACCOUNT_KEY_FILE=$HOME/.config/yc_sa_key.json" >> $GITHUB_ENV
       
