@@ -452,7 +452,7 @@ EOF
     echo -e "     • ${GREEN}YC_SERVICE_ACCOUNT_KEY${NC} - JSON ключ сервисного аккаунта"
     echo -e "     • ${GREEN}AWS_ACCESS_KEY_ID${NC} - Access Key для S3 backend"
     echo -e "     • ${GREEN}AWS_SECRET_ACCESS_KEY${NC} - Secret Key для S3 backend"
-    echo -e "  ${YELLOW}2. Workflow файл создан:${NC} ${INFRASTRUCTURE_DIR}/.github/workflows/terraform.yml"
+    echo -e "  ${YELLOW}2. Workflow файл:${NC} .github/workflows/terraform.yml (должен быть в корне репозитория)"
     echo -e "  ${YELLOW}3. Инструкции:${NC} ${GITHUB_ACTIONS_README}"
     echo -e "  ${YELLOW}4. Получить значения секретов:${NC}"
     echo -e "     cd ${BACKEND_DIR}"

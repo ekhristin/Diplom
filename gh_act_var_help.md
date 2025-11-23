@@ -111,7 +111,7 @@ grep secret_key terrafom-backend/credentials.env | cut -d'=' -f2 | tr -d '"'
 - `true` - развертывание включено (выполняются все шаги CI/CD)
 - `false` - развертывание отключено (все шаги пропускаются)
 
-**По умолчанию**: Значение установлено в файле `infrastructure/.github/workflows/terraform.yml` на строке 18
+**По умолчанию**: Значение установлено в файле `.github/workflows/terraform.yml` на строке 18
 
 **Примечание**: Если переменная не установлена в репозитории, будет использоваться значение из файла workflow.
 
@@ -166,7 +166,7 @@ echo $AWS_SECRET_ACCESS_KEY
    - ✅ `UP_INF` - установлена в нужное значение (или используется значение из workflow файла)
 
 3. **Workflow файл**:
-   - ✅ Файл `infrastructure/.github/workflows/terraform.yml` существует
+   - ✅ Файл `.github/workflows/terraform.yml` существует
    - ✅ Переменная `UP_INF` установлена в нужное значение (строка 18)
 
 ---
@@ -253,7 +253,7 @@ echo $AWS_SECRET_ACCESS_KEY
 
 ### Изменение значения UP_INF:
 
-Отредактируйте файл `infrastructure/.github/workflows/terraform.yml`:
+Отредактируйте файл `.github/workflows/terraform.yml`:
 
 ```yaml
 env:
@@ -299,7 +299,7 @@ env:
 **Причина**: Переменная `UP_INF` установлена в `'false'`.
 
 **Решение**:
-1. Откройте файл `infrastructure/.github/workflows/terraform.yml`
+1. Откройте файл `.github/workflows/terraform.yml`
 2. Измените значение `UP_INF: 'false'` на `UP_INF: 'true'`
 3. Закоммитьте и запушьте изменения
 
