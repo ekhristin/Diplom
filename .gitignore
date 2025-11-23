@@ -50,4 +50,6 @@ ss
 **/ss
 *.key
 *.json.key
-
+# gitignore для app-test-web
+/infrastructure/app-test-web/.gitignore
+/infrastructure/app-test-web/.git
