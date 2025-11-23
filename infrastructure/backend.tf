@@ -2,13 +2,10 @@ terraform {
   backend "s3" {
     bucket                      = "diplom-kh-20251109-204448"
     key                         = "terraform.tfstate"
-    endpoints = {
-      s3 = "https://storage.yandexcloud.net"
-    }
+    endpoint                    = "https://storage.yandexcloud.net"
     region                      = "ru-central1"
     skip_region_validation      = true
     skip_credentials_validation = true
-    skip_requesting_account_id  = true
     skip_metadata_api_check     = true
     
     # Учетные данные загружаются из переменных окружения:
