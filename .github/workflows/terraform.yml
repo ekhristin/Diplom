@@ -62,6 +62,28 @@ jobs:
           echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
           echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
       
+      - name: Configure Terraform variables
+        if: steps.check_flag.outputs.deploy == 'true'
+        run: |
+          # Обязательные переменные из terraform.tfvars
+          echo "TF_VAR_folder_id=${{ secrets.TF_VAR_folder_id }}" >> $GITHUB_ENV
+          # Опциональные переменные (могут быть пустыми, используются значения по умолчанию из variables.tf)
+          if [ -n "${{ secrets.TF_VAR_cloud_id }}" ]; then
+            echo "TF_VAR_cloud_id=${{ secrets.TF_VAR_cloud_id }}" >> $GITHUB_ENV
+          fi
+          if [ -n "${{ secrets.TF_VAR_environment }}" ]; then
+            echo "TF_VAR_environment=${{ secrets.TF_VAR_environment }}" >> $GITHUB_ENV
+          else
+            echo "TF_VAR_environment=dev" >> $GITHUB_ENV
+          fi
+          if [ -n "${{ secrets.TF_VAR_project_name }}" ]; then
+            echo "TF_VAR_project_name=${{ secrets.TF_VAR_project_name }}" >> $GITHUB_ENV
+          else
+            echo "TF_VAR_project_name=diplom" >> $GITHUB_ENV
+          fi
+          # service_account_key_file оставляем пустым для CI/CD, будет использована переменная окружения YC_SERVICE_ACCOUNT_KEY_FILE
+          echo "TF_VAR_service_account_key_file=" >> $GITHUB_ENV
+      
       - name: Terraform Init
         if: steps.check_flag.outputs.deploy == 'true'
         working-directory: ./infrastructure

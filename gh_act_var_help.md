@@ -87,6 +87,80 @@ grep secret_key terrafom-backend/credentials.env | cut -d'=' -f2 | tr -d '"'
 
 ---
 
+#### 4. TF_VAR_folder_id
+
+**Описание**: ID каталога Yandex Cloud, в котором создается инфраструктура. Обязательная переменная для Terraform.
+
+**Как получить**:
+```bash
+# Из terraform.tfvars
+grep folder_id infrastructure/terraform.tfvars | cut -d'"' -f2
+```
+
+Или через Yandex Cloud CLI:
+```bash
+yc config get folder-id
+```
+
+**Формат**: Строка вида `b1gb7eigrg8f1c85cu89` (ID каталога Yandex Cloud)
+
+**Важно**: Это обязательная переменная. Без неё Terraform не сможет создать ресурсы.
+
+---
+
+#### 5. TF_VAR_cloud_id (Опционально)
+
+**Описание**: ID облака Yandex Cloud. Опциональная переменная для Terraform.
+
+**Как получить**:
+```bash
+# Из terraform.tfvars
+grep cloud_id infrastructure/terraform.tfvars | cut -d'"' -f2
+```
+
+Или через Yandex Cloud CLI:
+```bash
+yc config get cloud-id
+```
+
+**Формат**: Строка вида `b1gl1mia19itahjudhdr` (ID облака Yandex Cloud)
+
+**Примечание**: Если переменная не установлена, будет использовано значение по умолчанию (пустая строка).
+
+---
+
+#### 6. TF_VAR_environment (Опционально)
+
+**Описание**: Окружение для развертывания (dev, staging, prod). Используется для меток ресурсов.
+
+**Как получить**:
+```bash
+# Из terraform.tfvars
+grep environment infrastructure/terraform.tfvars | cut -d'"' -f2
+```
+
+**Формат**: Строка (`dev`, `staging`, `prod` и т.д.)
+
+**По умолчанию**: `dev` (если переменная не установлена)
+
+---
+
+#### 7. TF_VAR_project_name (Опционально)
+
+**Описание**: Название проекта для меток ресурсов.
+
+**Как получить**:
+```bash
+# Из terraform.tfvars
+grep project_name infrastructure/terraform.tfvars | cut -d'"' -f2
+```
+
+**Формат**: Строка (например, `diplom`)
+
+**По умолчанию**: `diplom` (если переменная не установлена)
+
+---
+
 ## Переменные (Variables)
 
 Переменные используются для управления поведением workflow. В отличие от секретов, они не скрываются в логах.
@@ -161,6 +235,10 @@ echo $AWS_SECRET_ACCESS_KEY
    - ✅ `YC_SERVICE_ACCOUNT_KEY` - добавлен
    - ✅ `AWS_ACCESS_KEY_ID` - добавлен
    - ✅ `AWS_SECRET_ACCESS_KEY` - добавлен
+   - ✅ `TF_VAR_folder_id` - добавлен (обязательно)
+   - ✅ `TF_VAR_cloud_id` - добавлен (опционально)
+   - ✅ `TF_VAR_environment` - добавлен (опционально, по умолчанию `dev`)
+   - ✅ `TF_VAR_project_name` - добавлен (опционально, по умолчанию `diplom`)
 
 2. **Переменные** (опционально):
    - ✅ `UP_INF` - установлена в нужное значение (или используется значение из workflow файла)
@@ -237,6 +315,76 @@ echo $AWS_SECRET_ACCESS_KEY
    - Secret: вставьте значение
    - Add secret
 
+### Добавление секрета TF_VAR_folder_id:
+
+1. Получите folder_id:
+   ```bash
+   cd infrastructure
+   grep folder_id terraform.tfvars | cut -d'"' -f2 | pbcopy  # на macOS
+   # или
+   grep folder_id terraform.tfvars | cut -d'"' -f2 | xclip -selection clipboard  # на Linux
+   ```
+
+2. В GitHub:
+   - Settings → Secrets and variables → Actions → Secrets
+   - New repository secret
+   - Name: `TF_VAR_folder_id`
+   - Secret: вставьте значение (например, `b1gb7eigrg8f1c85cu89`)
+   - Add secret
+
+**Важно**: Это обязательный секрет. Без него Terraform не сможет создать ресурсы.
+
+### Добавление секрета TF_VAR_cloud_id (опционально):
+
+1. Получите cloud_id:
+   ```bash
+   cd infrastructure
+   grep cloud_id terraform.tfvars | cut -d'"' -f2 | pbcopy
+   ```
+
+2. В GitHub:
+   - Settings → Secrets and variables → Actions → Secrets
+   - New repository secret
+   - Name: `TF_VAR_cloud_id`
+   - Secret: вставьте значение (например, `b1gl1mia19itahjudhdr`)
+   - Add secret
+
+**Примечание**: Этот секрет опционален. Если не установлен, будет использовано пустое значение.
+
+### Добавление секрета TF_VAR_environment (опционально):
+
+1. Получите environment:
+   ```bash
+   cd infrastructure
+   grep environment terraform.tfvars | cut -d'"' -f2 | pbcopy
+   ```
+
+2. В GitHub:
+   - Settings → Secrets and variables → Actions → Secrets
+   - New repository secret
+   - Name: `TF_VAR_environment`
+   - Secret: вставьте значение (например, `dev`)
+   - Add secret
+
+**Примечание**: Этот секрет опционален. Если не установлен, будет использовано значение по умолчанию `dev`.
+
+### Добавление секрета TF_VAR_project_name (опционально):
+
+1. Получите project_name:
+   ```bash
+   cd infrastructure
+   grep project_name terraform.tfvars | cut -d'"' -f2 | pbcopy
+   ```
+
+2. В GitHub:
+   - Settings → Secrets and variables → Actions → Secrets
+   - New repository secret
+   - Name: `TF_VAR_project_name`
+   - Secret: вставьте значение (например, `diplom`)
+   - Add secret
+
+**Примечание**: Этот секрет опционален. Если не установлен, будет использовано значение по умолчанию `diplom`.
+
 ---
 
 ## Использование переменной UP_INF в workflow
@@ -303,6 +451,25 @@ env:
 2. Измените значение `UP_INF: 'false'` на `UP_INF: 'true'`
 3. Закоммитьте и запушьте изменения
 
+### Ошибка: "Missing required argument" или "No value for required variable"
+
+**Причина**: Не установлена обязательная переменная Terraform (например, `TF_VAR_folder_id`).
+
+**Решение**:
+1. Проверьте, что секрет `TF_VAR_folder_id` добавлен в GitHub Secrets
+2. Убедитесь, что значение соответствует значению из `infrastructure/terraform.tfvars`
+3. Проверьте логи workflow - шаг "Configure Terraform variables" должен выполняться успешно
+4. Для опциональных переменных (`TF_VAR_cloud_id`, `TF_VAR_environment`, `TF_VAR_project_name`) убедитесь, что они установлены или будут использованы значения по умолчанию
+
+### Ошибка: "Error: Invalid folder ID" или проблемы с созданием ресурсов
+
+**Причина**: Неверный `folder_id` или отсутствие прав у сервисного аккаунта.
+
+**Решение**:
+1. Проверьте, что секрет `TF_VAR_folder_id` содержит корректный ID каталога
+2. Убедитесь, что сервисный аккаунт (из `YC_SERVICE_ACCOUNT_KEY`) имеет необходимые права в указанном каталоге
+3. Проверьте, что `cloud_id` (если указан) соответствует каталогу
+
 ---
 
 ## Дополнительные ресурсы
@@ -318,6 +485,8 @@ env:
 
 ```bash
 # Получить все необходимые значения для GitHub Secrets
+
+# 1. Секреты для аутентификации (из terrafom-backend)
 cd terrafom-backend
 
 echo "=== YC_SERVICE_ACCOUNT_KEY ==="
@@ -328,7 +497,28 @@ terraform output -raw access_key_id
 echo ""
 echo "=== AWS_SECRET_ACCESS_KEY ==="
 terraform output -raw secret_access_key
+echo ""
+
+# 2. Переменные Terraform (из infrastructure/terraform.tfvars)
+cd ../infrastructure
+
+echo "=== TF_VAR_folder_id ==="
+grep folder_id terraform.tfvars | cut -d'"' -f2
+echo ""
+echo "=== TF_VAR_cloud_id ==="
+grep cloud_id terraform.tfvars | cut -d'"' -f2
+echo ""
+echo "=== TF_VAR_environment ==="
+grep environment terraform.tfvars | cut -d'"' -f2
+echo ""
+echo "=== TF_VAR_project_name ==="
+grep project_name terraform.tfvars | cut -d'"' -f2
 ```
 
 Скопируйте каждое значение и добавьте в соответствующие секреты GitHub Actions.
+
+**Примечание**: 
+- `TF_VAR_cloud_id`, `TF_VAR_environment` и `TF_VAR_project_name` являются опциональными
+- Если они не установлены, будут использованы значения по умолчанию: `cloud_id = ""`, `environment = "dev"`, `project_name = "diplom"`
+- `TF_VAR_folder_id` является обязательной переменной
 
