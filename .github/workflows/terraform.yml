@@ -143,23 +143,65 @@ jobs:
         if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         run: |
           export PATH=$PATH:$HOME/yandex-cloud/bin
-          mkdir -p ~/.kube
-          yc managed-kubernetes cluster get-credentials ${{ steps.k8s_info.outputs.cluster_id }} --external --kubeconfig ~/.kube/config
-          chmod 600 ~/.kube/config
-          export KUBECONFIG=~/.kube/config
-          echo "KUBECONFIG=~/.kube/config" >> $GITHUB_ENV
+          mkdir -p $HOME/.kube
+          KUBECONFIG_PATH="$HOME/.kube/config"
+          yc managed-kubernetes cluster get-credentials ${{ steps.k8s_info.outputs.cluster_id }} --external --kubeconfig "$KUBECONFIG_PATH"
+          chmod 600 "$KUBECONFIG_PATH"
+          # Устанавливаем KUBECONFIG с абсолютным путем для всех последующих шагов
+          echo "KUBECONFIG=$KUBECONFIG_PATH" >> $GITHUB_ENV
+          echo "✓ Kubeconfig сохранен в $KUBECONFIG_PATH"
+          # Проверяем, что файл создан и содержит данные
+          if [ -f "$KUBECONFIG_PATH" ]; then
+            echo "✓ Файл kubeconfig существует"
+            # Проверяем, что файл не пустой
+            if [ -s "$KUBECONFIG_PATH" ]; then
+              echo "✓ Файл kubeconfig содержит данные"
+            else
+              echo "::error::Файл kubeconfig пуст"
+              exit 1
+            fi
+          else
+            echo "::error::Файл kubeconfig не был создан"
+            exit 1
+          fi
       
       - name: Verify Kubernetes connection
         if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         run: |
           echo "Проверка подключения к Kubernetes кластеру..."
+          
+          # Устанавливаем KUBECONFIG с fallback
+          if [ -z "$KUBECONFIG" ]; then
+            export KUBECONFIG="$HOME/.kube/config"
+          fi
+          
+          echo "Используется KUBECONFIG: $KUBECONFIG"
+          
+          # Проверяем наличие файла
+          if [ ! -f "$KUBECONFIG" ]; then
+            echo "::error::Файл kubeconfig не найден: $KUBECONFIG"
+            echo "Проверяем альтернативные пути..."
+            if [ -f "$HOME/.kube/config" ]; then
+              export KUBECONFIG="$HOME/.kube/config"
+              echo "Найден kubeconfig в $HOME/.kube/config"
+            else
+              echo "::error::Kubeconfig не найден ни в одном из ожидаемых мест"
+              exit 1
+            fi
+          fi
+          
+          # Проверяем подключение
+          echo "Проверка подключения к кластеру..."
           kubectl cluster-info
           kubectl get nodes
           echo "✓ Подключение к кластеру успешно установлено"
       
       - name: Setup Ingress Controller (nginx)
         if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
         run: |
+          export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
           echo "Установка Ingress Controller (nginx)..."
           kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.1/deploy/static/provider/cloud/deploy.yaml
           echo "Ожидание готовности Ingress Controller..."
