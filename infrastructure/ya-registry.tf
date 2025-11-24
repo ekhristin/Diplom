@@ -11,4 +11,15 @@ resource "yandex_container_registry" "registry" {
   )
 }
 
+# Выводы
+output "registry_id" {
+  description = "ID созданного Container Registry"
+  value       = yandex_container_registry.registry.id
+}
+
+output "registry_name" {
+  description = "Имя созданного Container Registry"
+  value       = yandex_container_registry.registry.name
+}
+
 

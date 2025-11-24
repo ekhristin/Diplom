@@ -14,7 +14,10 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Переменные
-INFRASTRUCTURE_DIR="infrastructure"
+# Сохраняем корневую директорию проекта (где находится скрипт)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$SCRIPT_DIR"
+INFRASTRUCTURE_DIR="$PROJECT_ROOT/infrastructure"
 KUBE_CONFIG_FILE="${HOME}/.kube/config"
 KUBE_CONFIG_BACKUP="${HOME}/.kube/config.backup.$(date +%Y%m%d_%H%M%S)"
 
@@ -239,7 +242,11 @@ remove_kube_context() {
 
 # Функция автоматической инициализации Terraform
 auto_init_terraform() {
-    cd "$INFRASTRUCTURE_DIR"
+    local original_dir=$(pwd)
+    cd "$INFRASTRUCTURE_DIR" || {
+        echo -e "${RED}✗ Не удалось перейти в директорию $INFRASTRUCTURE_DIR${NC}"
+        return 1
+    }
 
     # Загрузка учетных данных для backend, если они есть
     if [ -f "../terrafom-backend/credentials.env" ]; then
@@ -257,15 +264,81 @@ auto_init_terraform() {
         echo -e "${YELLOW}Проверка инициализации Terraform...${NC}"
     fi
     
-    if ! terraform init; then
+    # Попытка обычной инициализации
+    local init_output=$(terraform init 2>&1)
+    local init_status=$?
+    
+    # Выводим вывод terraform init
+    echo "$init_output"
+    
+    # Проверяем наличие ошибок backend в выводе (даже если код возврата 0)
+    if echo "$init_output" | grep -q "Backend configuration changed" || \
+       echo "$init_output" | grep -q "Backend initialization required" || \
+       echo "$init_output" | grep -q "Backend configuration block has changed" || \
+       echo "$init_output" | grep -q "migrating existing state"; then
+        echo ""
+        echo -e "${YELLOW}Обнаружено изменение конфигурации backend. Выполняется переконфигурация...${NC}"
+        echo -e "${BLUE}Используется флаг -reconfigure для обновления конфигурации backend${NC}"
+        
+            # Выполняем переконфигурацию backend
+            if ! terraform init -reconfigure; then
+                echo -e "${RED}✗ Ошибка переконфигурации Terraform backend${NC}"
+                cd "$original_dir"
+                return 1
+            fi
+            echo -e "${GREEN}✓ Backend успешно переконфигурирован${NC}"
+    elif [ $init_status -ne 0 ]; then
+        # Другие ошибки инициализации
         echo -e "${RED}✗ Ошибка инициализации Terraform${NC}"
-        cd ..
+        cd "$original_dir"
         return 1
+    else
+        # Успешная инициализация
+        echo -e "${GREEN}✓ Terraform успешно инициализирован${NC}"
+    fi
+
+    cd "$original_dir"
+    return 0
+}
+
+# Функция проверки и исправления ошибок backend перед выполнением terraform команд
+check_and_fix_backend() {
+    local original_dir=$(pwd)
+    cd "$INFRASTRUCTURE_DIR" || {
+        echo -e "${RED}✗ Не удалось перейти в директорию $INFRASTRUCTURE_DIR${NC}"
+        return 1
+    }
+    
+    # Загрузка учетных данных для backend, если они есть
+    if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+        if [ -f "../terrafom-backend/credentials.env" ]; then
+            source ../terrafom-backend/credentials.env
+        elif [ -f "backend-secrets.tfvars" ]; then
+            export AWS_ACCESS_KEY_ID=$(grep -E '^\s*access_key\s*=' backend-secrets.tfvars | sed 's/.*=\s*"\(.*\)".*/\1/' | head -1)
+            export AWS_SECRET_ACCESS_KEY=$(grep -E '^\s*secret_key\s*=' backend-secrets.tfvars | sed 's/.*=\s*"\(.*\)".*/\1/' | head -1)
+        fi
     fi
     
-    echo -e "${GREEN}✓ Terraform успешно инициализирован${NC}"
-
-    cd ..
+    # Пытаемся выполнить легкую проверку состояния через terraform validate
+    # Это быстрее чем plan, но все равно проверяет backend
+    local validate_output=$(terraform validate 2>&1)
+    local validate_status=$?
+    
+    # Проверяем наличие ошибок backend
+    if [ $validate_status -ne 0 ] && (echo "$validate_output" | grep -q "Backend initialization required" || \
+       echo "$validate_output" | grep -q "Backend configuration block has changed" || \
+       echo "$validate_output" | grep -q "Backend configuration changed"); then
+        echo -e "${YELLOW}Обнаружена проблема с backend. Выполняется переинициализация...${NC}"
+        echo -e "${BLUE}Выполняется terraform init -reconfigure...${NC}"
+        if ! terraform init -reconfigure; then
+            echo -e "${RED}✗ Ошибка переконфигурации Terraform backend${NC}"
+            cd "$original_dir"
+            return 1
+        fi
+        echo -e "${GREEN}✓ Backend успешно переконфигурирован${NC}"
+    fi
+    
+    cd "$original_dir"
     return 0
 }
 
@@ -290,6 +363,19 @@ deploy_infrastructure() {
             export AWS_ACCESS_KEY_ID=$(grep -E '^\s*access_key\s*=' backend-secrets.tfvars | sed 's/.*=\s*"\(.*\)".*/\1/' | head -1)
             export AWS_SECRET_ACCESS_KEY=$(grep -E '^\s*secret_key\s*=' backend-secrets.tfvars | sed 's/.*=\s*"\(.*\)".*/\1/' | head -1)
         fi
+    fi
+
+    # Проверка и исправление backend перед планированием
+    if ! check_and_fix_backend; then
+        return 1
+    fi
+    
+    # Убеждаемся, что мы в правильной директории
+    if [ "$(pwd)" != "$INFRASTRUCTURE_DIR" ]; then
+        cd "$INFRASTRUCTURE_DIR" || {
+            echo -e "${RED}✗ Не удалось перейти в директорию $INFRASTRUCTURE_DIR${NC}"
+            return 1
+        }
     fi
 
     # Планирование изменений
@@ -381,8 +467,23 @@ destroy_infrastructure() {
     remove_kube_context
     echo ""
 
+    # Автоматическая инициализация Terraform
+    if ! auto_init_terraform; then
+        return 1
+    fi
+
     # Переход в директорию infrastructure
     cd "$INFRASTRUCTURE_DIR"
+
+    # Загрузка учетных данных для backend (если еще не загружены)
+    if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+        if [ -f "../terrafom-backend/credentials.env" ]; then
+            source ../terrafom-backend/credentials.env
+        elif [ -f "backend-secrets.tfvars" ]; then
+            export AWS_ACCESS_KEY_ID=$(grep -E '^\s*access_key\s*=' backend-secrets.tfvars | sed 's/.*=\s*"\(.*\)".*/\1/' | head -1)
+            export AWS_SECRET_ACCESS_KEY=$(grep -E '^\s*secret_key\s*=' backend-secrets.tfvars | sed 's/.*=\s*"\(.*\)".*/\1/' | head -1)
+        fi
+    fi
 
     # Проверка наличия terraform state
     if [ ! -f "terraform.tfstate" ] && [ ! -d ".terraform" ]; then
@@ -390,6 +491,13 @@ destroy_infrastructure() {
         cd ..
         return 1
     fi
+
+    # Проверка и исправление backend перед планированием удаления
+    if ! check_and_fix_backend; then
+        cd ..
+        return 1
+    fi
+    cd "$INFRASTRUCTURE_DIR"
 
     # Планирование удаления
     echo -e "${YELLOW}Планирование удаления...${NC}"
@@ -470,6 +578,13 @@ plan_terraform() {
         fi
     fi
 
+    # Проверка и исправление backend перед планированием
+    if ! check_and_fix_backend; then
+        cd ..
+        return 1
+    fi
+    cd "$INFRASTRUCTURE_DIR"
+
     terraform plan
 
     cd ..
@@ -516,4 +631,5 @@ main() {
 
 # Запуск главной функции
 main
+
 
