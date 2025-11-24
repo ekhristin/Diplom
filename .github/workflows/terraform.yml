@@ -295,17 +295,6 @@ jobs:
           fi
           echo "✓ Ingress для Grafana настроен, доступен по адресу: http://${INGRESS_IP}/grafana"
       
-      - name: Setup SSH key for Git clone
-        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan github.com >> ~/.ssh/known_hosts
-          echo "✓ SSH ключ настроен"
-      
       - name: Get Container Registry information
         if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         id: registry_info
@@ -340,8 +329,9 @@ jobs:
         if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         run: |
           echo "Клонирование репозитория приложения..."
-          git clone git@github.com:ekhristin/app-test-web.git app-test-web || {
-            echo "::error::Не удалось клонировать репозиторий. Убедитесь, что SSH ключ добавлен в GitHub Secrets (DEPLOY_KEY)"
+          # Используем HTTPS для публичного репозитория
+          git clone https://github.com/ekhristin/app-test-web.git app-test-web || {
+            echo "::error::Не удалось клонировать репозиторий"
             exit 1
           }
           cd app-test-web
