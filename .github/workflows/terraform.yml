@@ -13,7 +13,7 @@ on:
 
 env:
   # Переменная для управления развертыванием инфраструктуры
-  # 'true' - развертttestывание включено (terraform apply)
+  # 'true' - развертttesttest4ывание включено (terraform apply)
   # 'false' - удаление инфраструктуры (terraform destroy)
   UP_INF: 'true' # 'false'/'true'
 
@@ -261,11 +261,9 @@ jobs:
         run: |
           export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
           echo "Настройка Ingress для Grafana..."
-          # Извлекаем только IP или домен из endpoint (убираем https:// и порт)
-          CLUSTER_ENDPOINT="${{ steps.k8s_info.outputs.cluster_endpoint }}"
-          CLUSTER_HOST=$(echo "$CLUSTER_ENDPOINT" | sed 's|https\?://||' | sed 's|:.*||')
-          echo "Используется host: $CLUSTER_HOST"
           
+          # Kubernetes Ingress не поддерживает IP-адреса в поле host
+          # Оставляем host пустым, чтобы Ingress работал для любого хоста (включая IP)
           cat <<EOF | kubectl apply -f -
           apiVersion: networking.k8s.io/v1
           kind: Ingress
@@ -278,8 +276,7 @@ jobs:
           spec:
             ingressClassName: nginx
             rules:
-            - host: ${CLUSTER_HOST}
-              http:
+            - http:
                 paths:
                 - path: /grafana
                   pathType: Prefix
@@ -289,7 +286,14 @@ jobs:
                       port:
                         number: 3000
           EOF
-          echo "✓ Ingress для Grafana настроен на ${CLUSTER_HOST}/grafana"
+          
+          # Получаем внешний IP Ingress Controller для формирования ссылки
+          INGRESS_IP=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          if [ -z "$INGRESS_IP" ]; then
+            CLUSTER_ENDPOINT="${{ steps.k8s_info.outputs.cluster_endpoint }}"
+            INGRESS_IP=$(echo "$CLUSTER_ENDPOINT" | sed 's|https\?://||' | sed 's|:.*||')
+          fi
+          echo "✓ Ingress для Grafana настроен, доступен по адресу: http://${INGRESS_IP}/grafana"
       
       - name: Setup SSH key for Git clone
         if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
@@ -385,10 +389,11 @@ jobs:
       
       - name: Deploy application to Kubernetes
         if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
         run: |
+          export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
           echo "Деплой приложения в Kubernetes..."
-          # Извлекаем только IP или домен из endpoint
-          CLUSTER_HOST=$(echo "${{ steps.k8s_info.outputs.cluster_endpoint }}" | sed 's|https\?://||' | sed 's|:.*||')
           
           # Имя образа из Container Registry
           IMAGE_NAME="cr.yandex/${{ steps.registry_info.outputs.registry_id }}/app-test-web:latest"
@@ -448,8 +453,7 @@ jobs:
           spec:
             ingressClassName: nginx
             rules:
-            - host: ${CLUSTER_HOST}
-              http:
+            - http:
                 paths:
                 - path: /
                   pathType: Prefix
