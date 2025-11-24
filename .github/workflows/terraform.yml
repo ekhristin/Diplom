@@ -196,6 +196,32 @@ jobs:
           kubectl get nodes
           echo "✓ Подключение к кластеру успешно установлено"
       
+      - name: Check cluster service account permissions
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        run: |
+          export PATH=$PATH:$HOME/yandex-cloud/bin
+          echo "Проверка прав Service Account кластера..."
+          
+          # Получаем ID Service Account кластера из Terraform
+          cd infrastructure
+          CLUSTER_SA_ID=$(terraform output -raw k8s_cluster_sa_id 2>/dev/null || echo "")
+          cd ..
+          
+          if [ -n "$CLUSTER_SA_ID" ]; then
+            echo "✓ Service Account ID: $CLUSTER_SA_ID"
+            echo ""
+            echo "Роли Service Account в папке:"
+            FOLDER_ID="${{ env.TF_VAR_folder_id }}"
+            if [ -n "$FOLDER_ID" ]; then
+              yc resource-manager folder list-access-bindings "$FOLDER_ID" --format json 2>/dev/null | \
+                jq -r ".[] | select(.subject.id == \"$CLUSTER_SA_ID\") | \"  - \(.role)\"" 2>/dev/null || \
+                echo "  (Не удалось получить список ролей, проверьте права доступа)"
+            fi
+          else
+            echo "⚠️  Service Account не найден в Terraform outputs"
+            echo "   Это может означать, что кластер еще не создан или outputs не обновлены"
+          fi
+      
       - name: Setup Ingress Controller (nginx)
         if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         env:
@@ -209,6 +235,31 @@ jobs:
             --for=condition=ready pod \
             --selector=app.kubernetes.io/component=controller \
             --timeout=300s || echo "Ingress Controller может быть еще не готов"
+          
+          echo "Ожидание назначения внешнего IP для Ingress Controller..."
+          for i in {1..30}; do
+            INGRESS_IP=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+            if [ -n "$INGRESS_IP" ]; then
+              echo "✓ Ingress Controller получил внешний IP: $INGRESS_IP"
+              echo "INGRESS_IP=$INGRESS_IP" >> $GITHUB_ENV
+              break
+            fi
+            echo "Ожидание внешнего IP... ($i/30)"
+            sleep 10
+          done
+          
+          if [ -z "$INGRESS_IP" ]; then
+            echo "⚠️  Внешний IP еще не назначен, но продолжаем установку"
+            echo ""
+            echo "Проверка событий сервиса для диагностики:"
+            kubectl describe service ingress-nginx-controller -n ingress-nginx | grep -A 10 "Events:" || echo "События не найдены"
+            echo ""
+            echo "⚠️  Если видите ошибку PermissionDenied, убедитесь, что Service Account кластера имеет роль 'editor' в папке"
+            echo "   Выполните: terraform apply для обновления прав Service Account"
+          fi
+          
+          echo "Статус Ingress Controller:"
+          kubectl get service ingress-nginx-controller -n ingress-nginx
           echo "✓ Ingress Controller установлен"
       
       - name: Install kube-prometheus stack
@@ -262,8 +313,14 @@ jobs:
           export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
           echo "Настройка Ingress для Grafana..."
           
+          # Проверяем, что сервис Grafana существует
+          echo "Проверка сервиса Grafana..."
+          kubectl get service grafana -n monitoring || echo "⚠️  Сервис Grafana не найден"
+          
           # Kubernetes Ingress не поддерживает IP-адреса в поле host
           # Оставляем host пустым, чтобы Ingress работал для любого хоста (включая IP)
+          # Для Grafana нужно настроить правильную работу с подпутем
+          # Grafana должна быть настроена на работу с root_path=/grafana
           cat <<EOF | kubectl apply -f -
           apiVersion: networking.k8s.io/v1
           kind: Ingress
@@ -287,12 +344,37 @@ jobs:
                         number: 3000
           EOF
           
+          # Настраиваем Grafana для работы с подпутем /grafana через ConfigMap
+          echo "Настройка Grafana для работы с подпутем /grafana..."
+          # Получаем IP для настройки root_url
+          INGRESS_IP_FOR_GRAFANA=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          if [ -z "$INGRESS_IP_FOR_GRAFANA" ]; then
+            CLUSTER_ENDPOINT="${{ steps.k8s_info.outputs.cluster_endpoint }}"
+            INGRESS_IP_FOR_GRAFANA=$(echo "$CLUSTER_ENDPOINT" | sed 's|https\?://||' | sed 's|:.*||')
+          fi
+          
+          # Создаем или обновляем ConfigMap для Grafana
+          kubectl create configmap grafana-config -n monitoring --from-literal=GF_SERVER_ROOT_URL="http://${INGRESS_IP_FOR_GRAFANA}/grafana" --from-literal=GF_SERVER_SERVE_FROM_SUB_PATH="true" --dry-run=client -o yaml | kubectl apply -f - || echo "Не удалось создать ConfigMap"
+          
+          # Применяем настройки через переменные окружения в Deployment
+          kubectl set env deployment/grafana -n monitoring \
+            GF_SERVER_ROOT_URL="http://${INGRESS_IP_FOR_GRAFANA}/grafana" \
+            GF_SERVER_SERVE_FROM_SUB_PATH="true" || echo "Не удалось обновить переменные окружения Grafana"
+          
+          # Ждем перезапуска подов
+          echo "Ожидание перезапуска подов Grafana..."
+          sleep 10
+          kubectl rollout status deployment/grafana -n monitoring --timeout=120s || echo "Grafana может быть еще не готова"
+          
           # Получаем внешний IP Ingress Controller для формирования ссылки
           INGRESS_IP=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
           if [ -z "$INGRESS_IP" ]; then
             CLUSTER_ENDPOINT="${{ steps.k8s_info.outputs.cluster_endpoint }}"
             INGRESS_IP=$(echo "$CLUSTER_ENDPOINT" | sed 's|https\?://||' | sed 's|:.*||')
           fi
+          
+          echo "Проверка статуса Ingress для Grafana..."
+          kubectl get ingress grafana-ingress -n monitoring
           echo "✓ Ingress для Grafana настроен, доступен по адресу: http://${INGRESS_IP}/grafana"
       
       - name: Get Container Registry information
@@ -457,43 +539,128 @@ jobs:
           echo "Ожидание готовности приложения..."
           kubectl wait --for=condition=available deployment/app-test-web -n app-test-web --timeout=300s || echo "Приложение может быть еще не готово"
           echo "✓ Приложение развернуто"
+          
+          # Проверка статуса Ingress для приложения
+          echo "Проверка статуса Ingress для приложения..."
+          kubectl get ingress app-test-web-ingress -n app-test-web
+      
+      - name: Diagnostic information
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
+        run: |
+          export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🔍 ДИАГНОСТИЧЕСКАЯ ИНФОРМАЦИЯ"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          echo ""
+          echo "📊 Статус Ingress Controller:"
+          kubectl get service ingress-nginx-controller -n ingress-nginx
+          INGRESS_IP=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          if [ -z "$INGRESS_IP" ]; then
+            echo "⚠️  Внешний IP для Ingress Controller еще не назначен"
+            echo "   Это может занять несколько минут в Yandex Cloud"
+          else
+            echo "✓ Внешний IP Ingress Controller: $INGRESS_IP"
+          fi
+          
+          echo ""
+          echo "📊 Статус Ingress ресурсов:"
+          echo "Grafana Ingress:"
+          kubectl get ingress grafana-ingress -n monitoring || echo "  Ingress не найден"
+          echo ""
+          echo "Application Ingress:"
+          kubectl get ingress app-test-web-ingress -n app-test-web || echo "  Ingress не найден"
+          
+          echo ""
+          echo "📊 Статус сервисов:"
+          echo "Grafana Service:"
+          kubectl get service grafana -n monitoring || echo "  Сервис не найден"
+          echo ""
+          echo "Application Service:"
+          kubectl get service app-test-web -n app-test-web || echo "  Сервис не найден"
+          
+          echo ""
+          echo "📊 Статус подов:"
+          echo "Grafana Pods:"
+          kubectl get pods -n monitoring -l app.kubernetes.io/name=grafana || echo "  Поды не найдены"
+          echo ""
+          echo "Application Pods:"
+          kubectl get pods -n app-test-web -l app=app-test-web || echo "  Поды не найдены"
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
       
       - name: Wait for Ingress to be ready
         if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
         run: |
+          export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
           echo "Ожидание готовности Ingress Controller..."
-          # Ждем получения внешнего IP для Ingress Controller
-          for i in {1..30}; do
+          echo "⚠️  В Yandex Cloud назначение внешнего IP для LoadBalancer может занять до 10-15 минут"
+          
+          # Ждем получения внешнего IP для Ingress Controller (увеличиваем время ожидания)
+          INGRESS_IP=""
+          MAX_ATTEMPTS=60  # 60 попыток = 10 минут
+          for i in $(seq 1 $MAX_ATTEMPTS); do
             INGRESS_IP=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-            if [ -n "$INGRESS_IP" ]; then
+            if [ -n "$INGRESS_IP" ] && [ "$INGRESS_IP" != "<pending>" ] && [ "$INGRESS_IP" != "null" ]; then
               echo "✓ Ingress Controller получил внешний IP: $INGRESS_IP"
               echo "INGRESS_IP=$INGRESS_IP" >> $GITHUB_ENV
               break
             fi
-            echo "Ожидание внешнего IP для Ingress Controller... ($i/30)"
+            
+            # Показываем статус каждые 5 попыток
+            if [ $((i % 5)) -eq 0 ]; then
+              echo "Ожидание внешнего IP для Ingress Controller... ($i/$MAX_ATTEMPTS)"
+              echo "Текущий статус сервиса:"
+              kubectl get service ingress-nginx-controller -n ingress-nginx -o wide || true
+            fi
             sleep 10
           done
           
-          # Если IP не получен, используем адрес кластера
-          if [ -z "$INGRESS_IP" ]; then
-            echo "⚠️  Внешний IP для Ingress Controller еще не назначен, используем адрес кластера"
+          # Если IP все еще не получен, выводим предупреждение, но продолжаем
+          if [ -z "$INGRESS_IP" ] || [ "$INGRESS_IP" == "<pending>" ] || [ "$INGRESS_IP" == "null" ]; then
+            echo "⚠️  Внешний IP для LoadBalancer еще не назначен после $MAX_ATTEMPTS попыток"
+            echo "   Это нормально для Yandex Cloud - назначение IP может занять до 15-20 минут"
+            echo "   Проверьте статус позже командой:"
+            echo "   kubectl get service ingress-nginx-controller -n ingress-nginx"
+            echo ""
+            echo "   Или используйте адрес кластера для доступа:"
+            CLUSTER_ENDPOINT="${{ steps.k8s_info.outputs.cluster_endpoint }}"
+            CLUSTER_HOST=$(echo "$CLUSTER_ENDPOINT" | sed 's|https\?://||' | sed 's|:.*||')
+            echo "   Адрес кластера: $CLUSTER_HOST"
+            echo "INGRESS_IP=$CLUSTER_HOST" >> $GITHUB_ENV
           fi
       
       - name: Get deployment information and credentials
         if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
         id: deployment_info
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
         run: |
+          export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
           echo "Получение информации о развертывании..."
           
           # Получаем адрес для доступа
-          if [ -n "$INGRESS_IP" ]; then
-            CLUSTER_HOST="$INGRESS_IP"
-            echo "Используется внешний IP Ingress: $CLUSTER_HOST"
+          CLUSTER_HOST=""
+          
+          # Проверяем, есть ли реальный внешний IP LoadBalancer
+          INGRESS_IP_CHECK=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          
+          if [ -n "$INGRESS_IP_CHECK" ] && [ "$INGRESS_IP_CHECK" != "<pending>" ] && [ "$INGRESS_IP_CHECK" != "null" ]; then
+            CLUSTER_HOST="$INGRESS_IP_CHECK"
+            echo "✓ Используется внешний IP LoadBalancer: $CLUSTER_HOST"
+          elif [ -n "${{ env.INGRESS_IP }}" ]; then
+            CLUSTER_HOST="${{ env.INGRESS_IP }}"
+            echo "Используется адрес из окружения: $CLUSTER_HOST"
           else
             # Используем адрес кластера как fallback
             CLUSTER_ENDPOINT="${{ steps.k8s_info.outputs.cluster_endpoint }}"
             CLUSTER_HOST=$(echo "$CLUSTER_ENDPOINT" | sed 's|https\?://||' | sed 's|:.*||')
-            echo "Используется адрес кластера: $CLUSTER_HOST"
+            echo "⚠️  Используется адрес кластера (внешний IP LoadBalancer еще не назначен): $CLUSTER_HOST"
           fi
           
           # Получаем учетные данные Grafana из Secret
@@ -529,7 +696,7 @@ jobs:
             echo "✓ Пароль Grafana успешно получен из Secret"
           fi
           
-          # Формируем ссылки
+          # Формируем ссылки (всегда через LoadBalancer, без NodePort)
           APP_URL="http://${CLUSTER_HOST}/"
           GRAFANA_URL="http://${CLUSTER_HOST}/grafana"
           
@@ -568,11 +735,23 @@ jobs:
           echo "🆔 ID кластера: ${{ steps.k8s_info.outputs.cluster_id }}"
           echo ""
           INGRESS_IP_CHECK=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-          if [ -z "$INGRESS_IP_CHECK" ]; then
-            echo "⚠️  ВНИМАНИЕ: Внешний IP для Ingress Controller еще не назначен."
-            echo "   Это может занять несколько минут. Проверьте статус командой:"
+          INGRESS_TYPE=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.type}' 2>/dev/null || echo "")
+          
+          echo "Тип сервиса Ingress Controller: $INGRESS_TYPE"
+          
+          if [ -z "$INGRESS_IP_CHECK" ] || [ "$INGRESS_IP_CHECK" == "<pending>" ] || [ "$INGRESS_IP_CHECK" == "null" ]; then
+            echo "⚠️  ВНИМАНИЕ: Внешний IP для LoadBalancer еще не назначен."
+            echo "   В Yandex Cloud это может занять до 15-20 минут после создания сервиса."
+            echo "   Проверьте статус командой:"
             echo "   kubectl get service ingress-nginx-controller -n ingress-nginx"
             echo ""
+            echo "   После назначения IP, приложение будет доступно по адресу:"
+            echo "   http://<EXTERNAL-IP>/"
+            echo "   Grafana будет доступна по адресу:"
+            echo "   http://<EXTERNAL-IP>/grafana"
+            echo ""
+          else
+            echo "✓ Внешний IP LoadBalancer назначен: $INGRESS_IP_CHECK"
           fi
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo ""
@@ -605,6 +784,99 @@ jobs:
           
           ✅ Все компоненты успешно развернуты и готовы к использованию!
           EOF
+      
+      - name: Get registry information for cleanup
+        if: steps.check_flag.outputs.action == 'destroy' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        id: registry_cleanup_info
+        working-directory: ./infrastructure
+        run: |
+          echo "Получение информации о Container Registry для очистки..."
+          REGISTRY_ID=$(terraform output -raw registry_id 2>/dev/null || echo "")
+          REGISTRY_NAME=$(terraform output -raw registry_name 2>/dev/null || echo "")
+          
+          if [ -n "$REGISTRY_ID" ]; then
+            echo "registry_id=$REGISTRY_ID" >> $GITHUB_OUTPUT
+            echo "REGISTRY_ID=$REGISTRY_ID" >> $GITHUB_ENV
+            echo "✓ Container Registry ID: $REGISTRY_ID"
+          fi
+          
+          if [ -n "$REGISTRY_NAME" ]; then
+            echo "registry_name=$REGISTRY_NAME" >> $GITHUB_OUTPUT
+            echo "REGISTRY_NAME=$REGISTRY_NAME" >> $GITHUB_ENV
+            echo "✓ Container Registry Name: $REGISTRY_NAME"
+          fi
+          
+          if [ -z "$REGISTRY_ID" ] && [ -z "$REGISTRY_NAME" ]; then
+            echo "⚠️  Информация о Container Registry не найдена в Terraform outputs"
+            echo "   Возможно, registry уже удален или не был создан"
+          fi
+      
+      - name: Clean up Container Registry images
+        if: steps.check_flag.outputs.action == 'destroy' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && steps.registry_cleanup_info.outputs.registry_id != ''
+        run: |
+          export PATH=$PATH:$HOME/yandex-cloud/bin
+          echo "Очистка образов из Container Registry перед удалением..."
+          
+          REGISTRY_ID="${{ steps.registry_cleanup_info.outputs.registry_id }}"
+          
+          if [ -z "$REGISTRY_ID" ]; then
+            echo "⚠️  Registry ID не найден, пропускаем очистку"
+            exit 0
+          fi
+          
+          echo "Получение списка образов в registry: $REGISTRY_ID"
+          
+          # Получаем список всех образов в registry
+          IMAGES=$(yc container image list --registry-id "$REGISTRY_ID" --format json 2>/dev/null || echo "[]")
+          
+          if [ "$IMAGES" != "[]" ] && [ -n "$IMAGES" ]; then
+            echo "Найдено образов для удаления:"
+            echo "$IMAGES" | jq -r '.[] | "  - \(.id)"' 2>/dev/null || echo "$IMAGES"
+            
+            # Удаляем каждый образ
+            if command -v jq &> /dev/null; then
+              # Используем jq для парсинга JSON
+              IMAGE_IDS=$(echo "$IMAGES" | jq -r '.[].id' | tr '\n' ' ')
+              for image_id in $IMAGE_IDS; do
+                if [ -n "$image_id" ] && [ "$image_id" != "null" ]; then
+                  echo "Удаление образа: $image_id"
+                  yc container image delete "$image_id" --quiet 2>&1 || echo "⚠️  Не удалось удалить образ: $image_id"
+                fi
+              done
+            else
+              # Простой парсинг без jq
+              IMAGE_IDS=$(echo "$IMAGES" | grep -o '"id":"[^"]*"' | sed 's/"id":"\([^"]*\)"/\1/' | tr '\n' ' ')
+              for image_id in $IMAGE_IDS; do
+                if [ -n "$image_id" ]; then
+                  echo "Удаление образа: $image_id"
+                  yc container image delete "$image_id" --quiet 2>&1 || echo "⚠️  Не удалось удалить образ: $image_id"
+                fi
+              done
+            fi
+            
+            echo "✓ Очистка образов завершена"
+          else
+            echo "✓ Registry пуст, образы отсутствуют"
+          fi
+          
+          # Дополнительная проверка - пытаемся удалить все образы по имени registry
+          echo ""
+          echo "Проверка наличия оставшихся образов..."
+          sleep 2
+          REMAINING_IMAGES=$(yc container image list --registry-id "$REGISTRY_ID" --format json 2>/dev/null || echo "[]")
+          if [ "$REMAINING_IMAGES" != "[]" ] && [ -n "$REMAINING_IMAGES" ]; then
+            echo "⚠️  Обнаружены оставшиеся образы, повторная попытка удаления..."
+            if command -v jq &> /dev/null; then
+              REMAINING_IDS=$(echo "$REMAINING_IMAGES" | jq -r '.[].id' | tr '\n' ' ')
+              for image_id in $REMAINING_IDS; do
+                if [ -n "$image_id" ] && [ "$image_id" != "null" ]; then
+                  yc container image delete "$image_id" --quiet 2>&1 || true
+                fi
+              done
+            fi
+          fi
+          
+          echo "✓ Очистка Container Registry завершена"
       
       - name: Terraform Destroy
         if: steps.check_flag.outputs.action == 'destroy' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')

@@ -10,8 +10,11 @@ resource "yandex_resourcemanager_folder_iam_member" "k8s_cluster_sa_roles" {
   for_each = toset([
     "k8s.clusters.agent",
     "vpc.publicAdmin",
+    "vpc.user",  # Дополнительные права для работы с сетью
     "container-registry.images.puller",
-    "compute.viewer"
+    "compute.viewer",
+    "load-balancer.admin",
+    "editor"  # Полные права на папку для создания LoadBalancer и других ресурсов
   ])
   
   folder_id = var.folder_id
@@ -216,5 +219,10 @@ output "k8s_cluster_endpoint" {
 output "k8s_node_group_id" {
   description = "ID созданной группы нод"
   value       = yandex_kubernetes_node_group.diplom_workers.id
+}
+
+output "k8s_cluster_sa_id" {
+  description = "ID Service Account кластера Kubernetes"
+  value       = yandex_iam_service_account.k8s_cluster_sa.id
 }
 

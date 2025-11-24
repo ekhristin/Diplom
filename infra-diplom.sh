@@ -37,9 +37,10 @@ show_menu() {
     echo -e "  ${GREEN}3${NC}) Показать текущую конфигурацию"
     echo -e "  ${GREEN}4${NC}) Проверить подключение к Kubernetes"
     echo -e "  ${GREEN}5${NC}) Удалить контекст Kubernetes из ~/.kube/config"
-    echo -e "  ${GREEN}6${NC}) Выход"
+    echo -e "  ${GREEN}6${NC}) Получить и сохранить kubeconfig"
+    echo -e "  ${GREEN}7${NC}) Выход"
     echo ""
-    read -p "Ваш выбор [1-6]: " choice
+    read -p "Ваш выбор [1-7]: " choice
     echo ""
 }
 
@@ -114,6 +115,193 @@ add_kube_config() {
     fi
 
     echo -e "${GREEN}✓ Конфигурация Kubernetes добавлена в ${KUBE_CONFIG_FILE}${NC}"
+    return 0
+}
+
+# Функция получения и сохранения kubeconfig
+get_and_save_kubeconfig() {
+    echo -e "${GREEN}=== Получение и сохранение kubeconfig ===${NC}"
+    echo ""
+    
+    # Проверка наличия yc CLI
+    if ! command -v yc &> /dev/null; then
+        echo -e "${RED}✗ yc CLI не установлен${NC}"
+        echo -e "${YELLOW}  Установите Yandex Cloud CLI:${NC}"
+        echo -e "${YELLOW}  curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash${NC}"
+        return 1
+    fi
+    
+    local cluster_id=""
+    local cluster_name=""
+    
+    # Попытка 1: Получение из Terraform (если доступно)
+    if [ -d "$INFRASTRUCTURE_DIR" ] && [ -f "$INFRASTRUCTURE_DIR/terraform.tfstate" ] || [ -d "$INFRASTRUCTURE_DIR/.terraform" ]; then
+        echo -e "${YELLOW}Попытка получить информацию о кластере из Terraform...${NC}"
+        cd "$INFRASTRUCTURE_DIR" 2>/dev/null && {
+            cluster_id=$(terraform output -raw k8s_cluster_id 2>/dev/null || echo "")
+            cluster_name=$(terraform output -raw k8s_cluster_name 2>/dev/null || echo "")
+            cd ..
+        }
+    fi
+    
+    # Попытка 2: Получение списка кластеров через yc CLI
+    if [ -z "$cluster_id" ] && [ -z "$cluster_name" ]; then
+        echo -e "${YELLOW}Получение списка кластеров через yc CLI...${NC}"
+        
+        # Получаем список кластеров в табличном формате (более надежно)
+        local cluster_list=$(yc managed-kubernetes cluster list --format yaml 2>/dev/null || yc managed-kubernetes cluster list 2>/dev/null)
+        
+        if [ -n "$cluster_list" ] && ! echo "$cluster_list" | grep -q "no clusters found"; then
+            echo ""
+            echo -e "${CYAN}Доступные кластеры:${NC}"
+            echo "$cluster_list"
+            echo ""
+            
+            # Пытаемся получить список в JSON для парсинга
+            local clusters_json=$(yc managed-kubernetes cluster list --format json 2>/dev/null || echo "[]")
+            
+            if [ "$clusters_json" != "[]" ] && [ -n "$clusters_json" ]; then
+                # Если jq доступен, используем его для красивого вывода
+                if command -v jq &> /dev/null; then
+                    echo -e "${CYAN}Список кластеров (ID - Имя):${NC}"
+                    echo "$clusters_json" | jq -r '.[] | "  \(.id) - \(.name)"'
+                    echo ""
+                    
+                    # Предлагаем выбрать кластер
+                    read -p "Введите ID кластера (или нажмите Enter для автоматического выбора первого): " user_cluster_id
+                    
+                    if [ -n "$user_cluster_id" ]; then
+                        cluster_id="$user_cluster_id"
+                        cluster_name=$(echo "$clusters_json" | jq -r ".[] | select(.id==\"$user_cluster_id\") | .name" 2>/dev/null || echo "")
+                    else
+                        # Автоматически выбираем первый кластер
+                        cluster_id=$(echo "$clusters_json" | jq -r '.[0].id' 2>/dev/null || echo "")
+                        cluster_name=$(echo "$clusters_json" | jq -r '.[0].name' 2>/dev/null || echo "")
+                    fi
+                else
+                    # Без jq - используем простой парсинг
+                    echo -e "${CYAN}Введите ID или имя кластера:${NC}"
+                    read -p "ID или имя кластера: " user_input
+                    
+                    if [ -n "$user_input" ]; then
+                        # Проверяем, является ли это ID (обычно длинная строка) или именем
+                        if echo "$clusters_json" | grep -q "\"id\":\"$user_input\""; then
+                            cluster_id="$user_input"
+                        else
+                            cluster_name="$user_input"
+                        fi
+                    else
+                        # Пытаемся взять первый из списка
+                        cluster_id=$(echo "$clusters_json" | grep -o '"id":"[^"]*"' | head -1 | sed 's/"id":"\([^"]*\)"/\1/')
+                        cluster_name=$(echo "$clusters_json" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"\([^"]*\)"/\1/')
+                    fi
+                fi
+            else
+                # Если JSON не получился, просим ввести вручную
+                echo -e "${YELLOW}Введите информацию о кластере вручную:${NC}"
+                read -p "ID кластера (или нажмите Enter, чтобы использовать имя): " user_cluster_id
+                if [ -n "$user_cluster_id" ]; then
+                    cluster_id="$user_cluster_id"
+                else
+                    read -p "Имя кластера: " cluster_name
+                fi
+            fi
+        else
+            echo -e "${YELLOW}Кластеры не найдены или не удалось получить список${NC}"
+        fi
+    fi
+    
+    # Попытка 3: Интерактивный ввод
+    if [ -z "$cluster_id" ] && [ -z "$cluster_name" ]; then
+        echo -e "${YELLOW}Не удалось автоматически определить кластер${NC}"
+        echo -e "${BLUE}Введите информацию о кластере вручную:${NC}"
+        read -p "ID кластера (или нажмите Enter, чтобы использовать имя): " user_cluster_id
+        if [ -n "$user_cluster_id" ]; then
+            cluster_id="$user_cluster_id"
+        else
+            read -p "Имя кластера: " user_cluster_name
+            if [ -n "$user_cluster_name" ]; then
+                cluster_name="$user_cluster_name"
+            else
+                echo -e "${RED}✗ Не указана информация о кластере${NC}"
+                return 1
+            fi
+        fi
+    fi
+    
+    # Создание директории .kube, если её нет
+    mkdir -p "$(dirname "$KUBE_CONFIG_FILE")"
+    
+    # Резервная копия существующего конфига
+    if [ -f "$KUBE_CONFIG_FILE" ]; then
+        echo -e "${YELLOW}Создание резервной копии существующего конфига...${NC}"
+        cp "$KUBE_CONFIG_FILE" "$KUBE_CONFIG_BACKUP"
+        echo -e "${GREEN}✓ Резервная копия создана: ${KUBE_CONFIG_BACKUP}${NC}"
+    fi
+    
+    # Получение kubeconfig через yc CLI
+    echo -e "${BLUE}Получение kubeconfig через yc CLI...${NC}"
+    if [ -n "$cluster_id" ]; then
+        echo -e "${CYAN}Используется ID кластера: ${cluster_id}${NC}"
+        if yc managed-kubernetes cluster get-credentials "$cluster_id" --external --kubeconfig "$KUBE_CONFIG_FILE" 2>&1; then
+            echo -e "${GREEN}✓ Kubeconfig успешно получен и сохранен${NC}"
+        else
+            echo -e "${RED}✗ Не удалось получить kubeconfig по ID${NC}"
+            if [ -n "$cluster_name" ]; then
+                echo -e "${YELLOW}Попытка получить по имени кластера: ${cluster_name}${NC}"
+                if yc managed-kubernetes cluster get-credentials "$cluster_name" --external --kubeconfig "$KUBE_CONFIG_FILE" 2>&1; then
+                    echo -e "${GREEN}✓ Kubeconfig успешно получен и сохранен${NC}"
+                else
+                    echo -e "${RED}✗ Не удалось получить kubeconfig${NC}"
+                    return 1
+                fi
+            else
+                return 1
+            fi
+        fi
+    elif [ -n "$cluster_name" ]; then
+        echo -e "${CYAN}Используется имя кластера: ${cluster_name}${NC}"
+        if yc managed-kubernetes cluster get-credentials "$cluster_name" --external --kubeconfig "$KUBE_CONFIG_FILE" 2>&1; then
+            echo -e "${GREEN}✓ Kubeconfig успешно получен и сохранен${NC}"
+        else
+            echo -e "${RED}✗ Не удалось получить kubeconfig${NC}"
+            return 1
+        fi
+    else
+        echo -e "${RED}✗ Не удалось определить кластер${NC}"
+        return 1
+    fi
+    
+    # Установка правильных прав доступа
+    chmod 600 "$KUBE_CONFIG_FILE"
+    echo -e "${GREEN}✓ Права доступа установлены (600)${NC}"
+    
+    # Проверка содержимого файла
+    if [ -f "$KUBE_CONFIG_FILE" ] && [ -s "$KUBE_CONFIG_FILE" ]; then
+        echo -e "${GREEN}✓ Файл kubeconfig создан и содержит данные${NC}"
+        echo -e "${CYAN}Путь к файлу: ${KUBE_CONFIG_FILE}${NC}"
+        
+        # Показываем информацию о кластере из kubeconfig
+        echo ""
+        echo -e "${CYAN}Информация о кластере из kubeconfig:${NC}"
+        kubectl config view --kubeconfig="$KUBE_CONFIG_FILE" --minify -o jsonpath='{.clusters[0].name}' 2>/dev/null && echo "" || echo "Не удалось прочитать конфигурацию"
+        
+        # Проверка подключения
+        echo ""
+        echo -e "${YELLOW}Проверка подключения к кластеру...${NC}"
+        if KUBECONFIG="$KUBE_CONFIG_FILE" kubectl cluster-info &> /dev/null; then
+            echo -e "${GREEN}✓ Подключение к кластеру успешно${NC}"
+            KUBECONFIG="$KUBE_CONFIG_FILE" kubectl cluster-info
+        else
+            echo -e "${YELLOW}⚠ Не удалось проверить подключение, но конфиг сохранен${NC}"
+        fi
+    else
+        echo -e "${RED}✗ Файл kubeconfig пуст или не создан${NC}"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${GREEN}=== Kubeconfig успешно получен и сохранен! ===${NC}"
     return 0
 }
 
@@ -615,6 +803,9 @@ main() {
                 remove_kube_context
                 ;;
             6)
+                get_and_save_kubeconfig
+                ;;
+            7)
                 echo -e "${GREEN}Выход${NC}"
                 exit 0
                 ;;
