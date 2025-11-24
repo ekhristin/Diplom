@@ -13,7 +13,7 @@ on:
 
 env:
   # Переменная для управления развертыванием инфраструктуры
-  # 'true' - развертtывание включено (terraform apply)
+  # 'true' - развертttestывание включено (terraform apply)
   # 'false' - удаление инфраструктуры (terraform destroy)
   UP_INF: 'true' # 'false'/'true'
 
@@ -256,39 +256,16 @@ jobs:
       
       - name: Setup Ingress for Grafana
         if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
         run: |
-          echo "Настройка Ingress для Grafana..."
-          cat <<EOF | kubectl apply -f -
-          apiVersion: networking.k8s.io/v1
-          kind: Ingress
-          metadata:
-            name: grafana-ingress
-            namespace: monitoring
-            annotations:
-              nginx.ingress.kubernetes.io/rewrite-target: /
-              nginx.ingress.kubernetes.io/ssl-redirect: "false"
-          spec:
-            ingressClassName: nginx
-            rules:
-            - host: ${{ steps.k8s_info.outputs.cluster_endpoint }}
-              http:
-                paths:
-                - path: /grafana
-                  pathType: Prefix
-                  backend:
-                    service:
-                      name: grafana
-                      port:
-                        number: 3000
-          EOF
-          echo "✓ Ingress для Grafana настроен"
-      
-      - name: Setup Ingress for Grafana
-        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-        run: |
+          export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
           echo "Настройка Ingress для Grafana..."
           # Извлекаем только IP или домен из endpoint (убираем https:// и порт)
-          CLUSTER_HOST=$(echo "${{ steps.k8s_info.outputs.cluster_endpoint }}" | sed 's|https\?://||' | sed 's|:.*||')
+          CLUSTER_ENDPOINT="${{ steps.k8s_info.outputs.cluster_endpoint }}"
+          CLUSTER_HOST=$(echo "$CLUSTER_ENDPOINT" | sed 's|https\?://||' | sed 's|:.*||')
+          echo "Используется host: $CLUSTER_HOST"
+          
           cat <<EOF | kubectl apply -f -
           apiVersion: networking.k8s.io/v1
           kind: Ingress
