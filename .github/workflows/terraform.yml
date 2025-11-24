@@ -13,7 +13,7 @@ on:
 
 env:
   # Переменная для управления развертыванием инфраструктуры
-  # 'true' - развертывание включено (terraform apply)
+  # 'true' - развертtывание включено (terraform apply)
   # 'false' - удаление инфраструктуры (terraform destroy)
   UP_INF: 'true' # 'false'/'true'
 
@@ -213,19 +213,36 @@ jobs:
       
       - name: Install kube-prometheus stack
         if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
         run: |
+          export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
           echo "Установка kube-prometheus stack..."
-          # Создание namespace и CRDs
-          kubectl apply --server-side -f https://raw.githubusercontent.com/prometheus-operator/kube-prometheus/release-0.16/manifests/setup
+          
+          # Клонируем репозиторий kube-prometheus для получения манифестов
+          KUBE_PROMETHEUS_VERSION="v0.16.0"
+          echo "Клонирование kube-prometheus версии $KUBE_PROMETHEUS_VERSION..."
+          git clone --depth 1 --branch $KUBE_PROMETHEUS_VERSION https://github.com/prometheus-operator/kube-prometheus.git /tmp/kube-prometheus || {
+            echo "Не удалось клонировать версию $KUBE_PROMETHEUS_VERSION, используем main ветку..."
+            git clone --depth 1 https://github.com/prometheus-operator/kube-prometheus.git /tmp/kube-prometheus
+          }
+          
+          # Применяем setup манифесты (CRDs и namespace)
+          echo "Применение setup манифестов (CRDs)..."
+          kubectl apply --server-side -f /tmp/kube-prometheus/manifests/setup
+          
           # Ожидание готовности CRDs
           echo "Ожидание готовности CRDs..."
-          sleep 10
+          sleep 15
           kubectl wait \
             --for condition=Established \
             --all CustomResourceDefinition \
-            --timeout=300s || true
+            --timeout=300s || echo "Некоторые CRDs могут быть еще не готовы"
+          
           # Применение остальных манифестов
-          kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/kube-prometheus/release-0.16/manifests/
+          echo "Применение основных манифестов..."
+          kubectl apply -f /tmp/kube-prometheus/manifests/
+          
           echo "✓ kube-prometheus stack установлен"
       
       - name: Wait for kube-prometheus components
