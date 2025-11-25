@@ -328,14 +328,15 @@ jobs:
             name: grafana-ingress
             namespace: monitoring
             annotations:
-              nginx.ingress.kubernetes.io/rewrite-target: /
+              nginx.ingress.kubernetes.io/rewrite-target: /$2
+              nginx.ingress.kubernetes.io/use-regex: "true"
               nginx.ingress.kubernetes.io/ssl-redirect: "false"
           spec:
             ingressClassName: nginx
             rules:
             - http:
                 paths:
-                - path: /grafana
+                - path: /grafana(/|$)(.*)
                   pathType: Prefix
                   backend:
                     service:
@@ -375,6 +376,16 @@ jobs:
           
           echo "Проверка статуса Ingress для Grafana..."
           kubectl get ingress grafana-ingress -n monitoring
+          
+          # Проверяем, что сервис Grafana доступен
+          echo "Проверка доступности сервиса Grafana..."
+          kubectl get service grafana -n monitoring
+          kubectl get endpoints grafana -n monitoring
+          
+          # Проверяем поды Grafana
+          echo "Проверка подов Grafana..."
+          kubectl get pods -n monitoring -l app.kubernetes.io/name=grafana
+          
           echo "✓ Ingress для Grafana настроен, доступен по адресу: http://${INGRESS_IP}/grafana"
       
       - name: Get Container Registry information
@@ -521,7 +532,7 @@ jobs:
             name: app-test-web-ingress
             namespace: app-test-web
             annotations:
-              nginx.ingress.kubernetes.io/rewrite-target: /
+              nginx.ingress.kubernetes.io/ssl-redirect: "false"
           spec:
             ingressClassName: nginx
             rules:
@@ -543,6 +554,36 @@ jobs:
           # Проверка статуса Ingress для приложения
           echo "Проверка статуса Ingress для приложения..."
           kubectl get ingress app-test-web-ingress -n app-test-web
+          
+          # Проверяем, что сервис приложения доступен
+          echo "Проверка доступности сервиса приложения..."
+          kubectl get service app-test-web -n app-test-web
+          kubectl get endpoints app-test-web -n app-test-web
+          
+          # Проверяем поды приложения
+          echo "Проверка подов приложения..."
+          kubectl get pods -n app-test-web -l app=app-test-web
+          
+          # Проверяем логи подов приложения для диагностики
+          echo "Последние логи приложения (первые 20 строк):"
+          kubectl logs -n app-test-web -l app=app-test-web --tail=20 || echo "Не удалось получить логи"
+          
+          # Проверяем конфигурацию Ingress Controller
+          echo ""
+          echo "Проверка конфигурации Ingress Controller..."
+          kubectl get ingress --all-namespaces
+          
+          # Проверяем конфигурацию nginx в Ingress Controller
+          echo ""
+          echo "Проверка конфигурации nginx в Ingress Controller..."
+          INGRESS_POD=$(kubectl get pods -n ingress-nginx -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          if [ -n "$INGRESS_POD" ]; then
+            echo "Проверка конфигурации nginx для приложения:"
+            kubectl exec -n ingress-nginx "$INGRESS_POD" -- cat /etc/nginx/nginx.conf | grep -A 10 "app-test-web" || echo "Конфигурация для app-test-web не найдена"
+            echo ""
+            echo "Проверка конфигурации nginx для Grafana:"
+            kubectl exec -n ingress-nginx "$INGRESS_POD" -- cat /etc/nginx/nginx.conf | grep -A 10 "grafana" || echo "Конфигурация для grafana не найдена"
+          fi
       
       - name: Diagnostic information
         if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
