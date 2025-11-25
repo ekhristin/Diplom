@@ -320,7 +320,36 @@ jobs:
           # Kubernetes Ingress не поддерживает IP-адреса в поле host
           # Оставляем host пустым, чтобы Ingress работал для любого хоста (включая IP)
           # Для Grafana нужно настроить правильную работу с подпутем
-          # Grafana должна быть настроена на работу с root_path=/grafana
+          # Сначала настраиваем Grafana для работы с подпутем /grafana
+          echo "Настройка Grafana для работы с подпутем /grafana..."
+          
+          # Получаем IP для настройки root_url
+          INGRESS_IP_FOR_GRAFANA=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          if [ -z "$INGRESS_IP_FOR_GRAFANA" ]; then
+            CLUSTER_ENDPOINT="${{ steps.k8s_info.outputs.cluster_endpoint }}"
+            INGRESS_IP_FOR_GRAFANA=$(echo "$CLUSTER_ENDPOINT" | sed 's|https\?://||' | sed 's|:.*||')
+          fi
+          
+          echo "Настройка переменных окружения Grafana..."
+          # Применяем настройки через переменные окружения в Deployment
+          kubectl patch deployment grafana -n monitoring --type='json' -p='[
+            {"op": "add", "path": "/spec/template/spec/containers/0/env/-", "value": {"name": "GF_SERVER_ROOT_URL", "value": "http://'"${INGRESS_IP_FOR_GRAFANA}"'/grafana"}},
+            {"op": "add", "path": "/spec/template/spec/containers/0/env/-", "value": {"name": "GF_SERVER_SERVE_FROM_SUB_PATH", "value": "true"}}
+          ]' 2>/dev/null || {
+            # Если patch не сработал, используем set env
+            echo "Попытка обновления через set env..."
+            kubectl set env deployment/grafana -n monitoring \
+              GF_SERVER_ROOT_URL="http://${INGRESS_IP_FOR_GRAFANA}/grafana" \
+              GF_SERVER_SERVE_FROM_SUB_PATH="true" || echo "Не удалось обновить переменные окружения Grafana"
+          }
+          
+          # Ждем перезапуска подов
+          echo "Ожидание перезапуска подов Grafana..."
+          sleep 15
+          kubectl rollout status deployment/grafana -n monitoring --timeout=120s || echo "Grafana может быть еще не готова"
+          
+          # Создаем Ingress для Grafana с правильным rewrite
+          echo "Создание Ingress для Grafana..."
           cat <<EOF | kubectl apply -f -
           apiVersion: networking.k8s.io/v1
           kind: Ingress
@@ -328,9 +357,11 @@ jobs:
             name: grafana-ingress
             namespace: monitoring
             annotations:
-              nginx.ingress.kubernetes.io/rewrite-target: /$2
+              nginx.ingress.kubernetes.io/rewrite-target: /\$2
               nginx.ingress.kubernetes.io/use-regex: "true"
               nginx.ingress.kubernetes.io/ssl-redirect: "false"
+              nginx.ingress.kubernetes.io/configuration-snippet: |
+                more_set_headers "X-Forwarded-Prefix: /grafana";
           spec:
             ingressClassName: nginx
             rules:
@@ -344,28 +375,6 @@ jobs:
                       port:
                         number: 3000
           EOF
-          
-          # Настраиваем Grafana для работы с подпутем /grafana через ConfigMap
-          echo "Настройка Grafana для работы с подпутем /grafana..."
-          # Получаем IP для настройки root_url
-          INGRESS_IP_FOR_GRAFANA=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-          if [ -z "$INGRESS_IP_FOR_GRAFANA" ]; then
-            CLUSTER_ENDPOINT="${{ steps.k8s_info.outputs.cluster_endpoint }}"
-            INGRESS_IP_FOR_GRAFANA=$(echo "$CLUSTER_ENDPOINT" | sed 's|https\?://||' | sed 's|:.*||')
-          fi
-          
-          # Создаем или обновляем ConfigMap для Grafana
-          kubectl create configmap grafana-config -n monitoring --from-literal=GF_SERVER_ROOT_URL="http://${INGRESS_IP_FOR_GRAFANA}/grafana" --from-literal=GF_SERVER_SERVE_FROM_SUB_PATH="true" --dry-run=client -o yaml | kubectl apply -f - || echo "Не удалось создать ConfigMap"
-          
-          # Применяем настройки через переменные окружения в Deployment
-          kubectl set env deployment/grafana -n monitoring \
-            GF_SERVER_ROOT_URL="http://${INGRESS_IP_FOR_GRAFANA}/grafana" \
-            GF_SERVER_SERVE_FROM_SUB_PATH="true" || echo "Не удалось обновить переменные окружения Grafana"
-          
-          # Ждем перезапуска подов
-          echo "Ожидание перезапуска подов Grafana..."
-          sleep 10
-          kubectl rollout status deployment/grafana -n monitoring --timeout=120s || echo "Grafana может быть еще не готова"
           
           # Получаем внешний IP Ingress Controller для формирования ссылки
           INGRESS_IP=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
@@ -385,6 +394,14 @@ jobs:
           # Проверяем поды Grafana
           echo "Проверка подов Grafana..."
           kubectl get pods -n monitoring -l app.kubernetes.io/name=grafana
+          
+          # Проверяем переменные окружения в подах Grafana
+          echo "Проверка переменных окружения Grafana..."
+          GRAFANA_POD=$(kubectl get pods -n monitoring -l app.kubernetes.io/name=grafana -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          if [ -n "$GRAFANA_POD" ]; then
+            echo "Переменные окружения в поде $GRAFANA_POD:"
+            kubectl exec -n monitoring "$GRAFANA_POD" -- env | grep -E "GF_SERVER" || echo "Переменные GF_SERVER не найдены"
+          fi
           
           echo "✓ Ingress для Grafana настроен, доступен по адресу: http://${INGRESS_IP}/grafana"
       
