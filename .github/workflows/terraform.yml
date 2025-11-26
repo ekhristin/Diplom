@@ -317,6 +317,11 @@ jobs:
           echo "Проверка сервиса Grafana..."
           kubectl get service grafana -n monitoring || echo "⚠️  Сервис Grafana не найден"
           
+          # Удаляем существующие Ingress, которые могут конфликтовать с путем "/"
+          echo "Удаление существующих Ingress, которые могут конфликтовать..."
+          kubectl delete ingress grafana-ingress -n monitoring 2>/dev/null || echo "Ingress для Grafana не найден"
+          kubectl delete ingress app-test-web-ingress -n app-test-web 2>/dev/null || echo "Ingress для приложения не найден"
+          
           # Обновляем NetworkPolicy для Grafana, чтобы разрешить доступ от Ingress Controller
           echo "Обновление NetworkPolicy для Grafana..."
           kubectl patch networkpolicy grafana -n monitoring --type='json' -p='[
@@ -462,6 +467,10 @@ jobs:
         run: |
           export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
           echo "Деплой приложения в Kubernetes..."
+          
+          # Удаляем существующий Ingress для приложения, если он есть (чтобы избежать конфликтов)
+          echo "Удаление существующего Ingress для приложения (если есть)..."
+          kubectl delete ingress app-test-web-ingress -n app-test-web 2>/dev/null || echo "Ingress для приложения не найден, создаем новый"
           
           # Имя образа из Container Registry
           IMAGE_NAME="cr.yandex/${{ steps.registry_info.outputs.registry_id }}/app-test-web:latest"
