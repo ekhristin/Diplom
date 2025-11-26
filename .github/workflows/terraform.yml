@@ -351,6 +351,7 @@ jobs:
               nginx.ingress.kubernetes.io/ssl-redirect: "false"
               nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
               nginx.ingress.kubernetes.io/proxy-connect-timeout: "600"
+              nginx.ingress.kubernetes.io/rewrite-target: /
           spec:
             ingressClassName: nginx
             rules:
