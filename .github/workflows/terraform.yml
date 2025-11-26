@@ -196,31 +196,6 @@ jobs:
           kubectl get nodes
           echo "✓ Подключение к кластеру успешно установлено"
       
-      - name: Check cluster service account permissions
-        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-        run: |
-          export PATH=$PATH:$HOME/yandex-cloud/bin
-          echo "Проверка прав Service Account кластера..."
-          
-          # Получаем ID Service Account кластера из Terraform
-          cd infrastructure
-          CLUSTER_SA_ID=$(terraform output -raw k8s_cluster_sa_id 2>/dev/null || echo "")
-          cd ..
-          
-          if [ -n "$CLUSTER_SA_ID" ]; then
-            echo "✓ Service Account ID: $CLUSTER_SA_ID"
-            echo ""
-            echo "Роли Service Account в папке:"
-            FOLDER_ID="${{ env.TF_VAR_folder_id }}"
-            if [ -n "$FOLDER_ID" ]; then
-              yc resource-manager folder list-access-bindings "$FOLDER_ID" --format json 2>/dev/null | \
-                jq -r ".[] | select(.subject.id == \"$CLUSTER_SA_ID\") | \"  - \(.role)\"" 2>/dev/null || \
-                echo "  (Не удалось получить список ролей, проверьте права доступа)"
-            fi
-          else
-            echo "⚠️  Service Account не найден в Terraform outputs"
-            echo "   Это может означать, что кластер еще не создан или outputs не обновлены"
-          fi
       
       - name: Setup Ingress Controller (nginx)
         if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
@@ -317,8 +292,6 @@ jobs:
           echo "Проверка сервиса Grafana..."
           kubectl get service grafana -n monitoring || echo "⚠️  Сервис Grafana не найден"
           
-          # Удаляем переменные окружения Grafana, которые настраивают подпуть
-          # Grafana должна работать на корневом пути /, а не на /grafana
           echo "Удаление переменных окружения Grafana для работы на корневом пути..."
           kubectl set env deployment/grafana -n monitoring GF_SERVER_SERVE_FROM_SUB_PATH- GF_SERVER_ROOT_URL- 2>/dev/null || echo "Переменные окружения не найдены или уже удалены"
           
@@ -530,13 +503,15 @@ jobs:
             namespace: app-test-web
             annotations:
               nginx.ingress.kubernetes.io/ssl-redirect: "false"
+              nginx.ingress.kubernetes.io/rewrite-target: /\$1
+              nginx.ingress.kubernetes.io/use-regex: "true"
           spec:
             ingressClassName: nginx
             rules:
             - http:
                 paths:
-                - path: /app
-                  pathType: Prefix
+                - path: /app(.*)
+                  pathType: ImplementationSpecific
                   backend:
                     service:
                       name: app-test-web
@@ -683,8 +658,6 @@ jobs:
           echo "Получение информации о развертывании..."
           
           # Получаем адрес для доступа
-          CLUSTER_HOST=""
-          
           # Проверяем, есть ли реальный внешний IP LoadBalancer
           INGRESS_IP_CHECK=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
           
