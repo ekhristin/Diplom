@@ -348,8 +348,26 @@ jobs:
           sleep 15
           kubectl rollout status deployment/grafana -n monitoring --timeout=120s || echo "Grafana может быть еще не готова"
           
+          # Обновляем NetworkPolicy для Grafana, чтобы разрешить доступ от Ingress Controller
+          echo "Обновление NetworkPolicy для Grafana..."
+          kubectl patch networkpolicy grafana -n monitoring --type='json' -p='[
+            {
+              "op": "add",
+              "path": "/spec/ingress/0/from/-",
+              "value": {
+                "podSelector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/component": "controller",
+                    "app.kubernetes.io/name": "ingress-nginx"
+                  }
+                }
+              }
+            }
+          ]' 2>/dev/null || echo "NetworkPolicy уже обновлена или не найдена"
+          
           # Создаем Ingress для Grafana с правильным rewrite
           echo "Создание Ingress для Grafana..."
+          # Используем rewrite, который сохраняет /grafana в пути
           cat <<EOF | kubectl apply -f -
           apiVersion: networking.k8s.io/v1
           kind: Ingress
@@ -357,7 +375,7 @@ jobs:
             name: grafana-ingress
             namespace: monitoring
             annotations:
-              nginx.ingress.kubernetes.io/rewrite-target: /\$2
+              nginx.ingress.kubernetes.io/rewrite-target: /grafana\$1
               nginx.ingress.kubernetes.io/use-regex: "true"
               nginx.ingress.kubernetes.io/ssl-redirect: "false"
           spec:
@@ -373,6 +391,10 @@ jobs:
                       port:
                         number: 3000
           EOF
+          
+          # Проверяем, что Ingress создан
+          echo "Проверка создания Ingress..."
+          kubectl get ingress grafana-ingress -n monitoring
           
           # Получаем внешний IP Ingress Controller для формирования ссылки
           INGRESS_IP=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
