@@ -229,7 +229,7 @@ terraform destroy
 - Убедитесь, что endpoint указан правильно: `https://storage.yandexcloud.net`
 - Проверьте, что `skip_region_validation = true`
 
-## Дополнительные ресурсы
+## Дополнительные ресурсы.
 
 - [Документация Yandex Object Storage](https://cloud.yandex.ru/docs/storage/)
 - [Terraform Provider для Yandex Cloud](https://registry.terraform.io/providers/yandex-cloud/yandex/latest/docs)
