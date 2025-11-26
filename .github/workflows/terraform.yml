@@ -15,7 +15,7 @@ env:
   # Переменная для управления развертыванием инфраструктуры
   # 'true' - развертttesttest4ывание включено (terraform apply)
   # 'false' - удаление инфраструктуры (terraform destroy)
-  UP_INF: 'true' # 'false'/'true'
+  UP_INF: 'false' # 'false'/'true'
 
 jobs:
   terraform:
