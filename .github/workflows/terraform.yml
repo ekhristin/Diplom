@@ -367,7 +367,9 @@ jobs:
           
           # Создаем Ingress для Grafana с правильным rewrite
           echo "Создание Ingress для Grafana..."
-          # Используем rewrite, который сохраняет /grafana в пути
+          # Grafana настроена на работу с подпутем /grafana (GF_SERVER_SERVE_FROM_SUB_PATH=true)
+          # Поэтому запросы должны приходить в Grafana с путем, начинающимся с /grafana
+          # Используем regex, который захватывает все после /grafana (включая / или пустую строку)
           cat <<EOF | kubectl apply -f -
           apiVersion: networking.k8s.io/v1
           kind: Ingress
@@ -383,8 +385,8 @@ jobs:
             rules:
             - http:
                 paths:
-                - path: /grafana(/|$)(.*)
-                  pathType: ImplementationSpecific
+                - path: /grafana(/.*)?
+                  pathType: Prefix
                   backend:
                     service:
                       name: grafana
