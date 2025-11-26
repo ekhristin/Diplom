@@ -477,6 +477,8 @@ jobs:
           IMAGE_NAME="cr.yandex/${{ steps.registry_info.outputs.registry_id }}/app-test-web:latest"
           
           # Создание манифестов для деплоя с использованием образа из Container Registry
+          # ВАЖНО: В репозитории app-test-web нужно исправить nginx.conf
+          # Изменить location /app на location /app/ с alias вместо root
           cat <<EOF | kubectl apply -f -
           apiVersion: apps/v1
           kind: Deployment
@@ -528,15 +530,13 @@ jobs:
             namespace: app-test-web
             annotations:
               nginx.ingress.kubernetes.io/ssl-redirect: "false"
-              nginx.ingress.kubernetes.io/rewrite-target: /\$2
-              nginx.ingress.kubernetes.io/use-regex: "true"
           spec:
             ingressClassName: nginx
             rules:
             - http:
                 paths:
-                - path: /app(/|$)(.*)
-                  pathType: ImplementationSpecific
+                - path: /app
+                  pathType: Prefix
                   backend:
                     service:
                       name: app-test-web
