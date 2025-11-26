@@ -317,27 +317,27 @@ jobs:
           echo "Проверка сервиса Grafana..."
           kubectl get service grafana -n monitoring || echo "⚠️  Сервис Grafana не найден"
           
+          # Удаляем переменные окружения Grafana, которые настраивают подпуть
+          # Grafana должна работать на корневом пути /, а не на /grafana
+          echo "Удаление переменных окружения Grafana для работы на корневом пути..."
+          kubectl set env deployment/grafana -n monitoring GF_SERVER_SERVE_FROM_SUB_PATH- GF_SERVER_ROOT_URL- 2>/dev/null || echo "Переменные окружения не найдены или уже удалены"
+          
+          # Ждем перезапуска подов Grafana после изменения переменных окружения
+          if kubectl get deployment grafana -n monitoring &>/dev/null; then
+            echo "Ожидание перезапуска подов Grafana..."
+            sleep 10
+            kubectl rollout status deployment/grafana -n monitoring --timeout=120s || echo "Grafana может быть еще не готова"
+          fi
+          
           # Удаляем существующие Ingress, которые могут конфликтовать с путем "/"
           echo "Удаление существующих Ingress, которые могут конфликтовать..."
           kubectl delete ingress grafana-ingress -n monitoring 2>/dev/null || echo "Ingress для Grafana не найден"
           kubectl delete ingress app-test-web-ingress -n app-test-web 2>/dev/null || echo "Ingress для приложения не найден"
           
-          # Обновляем NetworkPolicy для Grafana, чтобы разрешить доступ от Ingress Controller
-          echo "Обновление NetworkPolicy для Grafana..."
-          kubectl patch networkpolicy grafana -n monitoring --type='json' -p='[
-            {
-              "op": "add",
-              "path": "/spec/ingress/0/from/-",
-              "value": {
-                "podSelector": {
-                  "matchLabels": {
-                    "app.kubernetes.io/component": "controller",
-                    "app.kubernetes.io/name": "ingress-nginx"
-                  }
-                }
-              }
-            }
-          ]' 2>/dev/null || echo "NetworkPolicy уже обновлена или не найдена"
+          # Удаляем NetworkPolicy для Grafana, так как она блокирует доступ от Ingress Controller
+          # NetworkPolicy можно настроить позже вручную, если потребуется
+          echo "Удаление NetworkPolicy для Grafana (блокирует доступ от Ingress Controller)..."
+          kubectl delete networkpolicy grafana -n monitoring 2>/dev/null || echo "NetworkPolicy не найдена или уже удалена"
           
           # Создаем Ingress для Grafana на корневом пути /
           echo "Создание Ingress для Grafana на пути /..."
