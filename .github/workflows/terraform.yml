@@ -369,8 +369,8 @@ jobs:
           echo "Создание Ingress для Grafana..."
           # Grafana настроена на работу с подпутем /grafana (GF_SERVER_SERVE_FROM_SUB_PATH=true)
           # Когда используется GF_SERVER_SERVE_FROM_SUB_PATH=true, Grafana ожидает запросы с путем /grafana
-          # НЕ используем rewrite-target - просто передаем путь как есть
-          # Ingress с pathType: Prefix автоматически передаст полный путь в backend
+          # НЕ используем rewrite-target - просто передаем путь как есть через Prefix
+          # Важно: snippet директивы отключены, поэтому не используем configuration-snippet
           cat <<EOF | kubectl apply -f -
           apiVersion: networking.k8s.io/v1
           kind: Ingress
@@ -381,9 +381,6 @@ jobs:
               nginx.ingress.kubernetes.io/ssl-redirect: "false"
               nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
               nginx.ingress.kubernetes.io/proxy-connect-timeout: "600"
-              nginx.ingress.kubernetes.io/configuration-snippet: |
-                proxy_set_header X-Forwarded-Prefix /grafana;
-                proxy_set_header X-Script-Name /grafana;
           spec:
             ingressClassName: nginx
             rules:
