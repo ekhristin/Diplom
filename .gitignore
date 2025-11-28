@@ -53,3 +53,6 @@ ss
 # gitignore для app-test-web
 /infrastructure/app-test-web/.gitignore
 /infrastructure/app-test-web/.git
+
+# CI/CD workflow для приложения (будет размещен в репозитории app-test-web)
+.github/workflows/buildanddeploy.yaml
