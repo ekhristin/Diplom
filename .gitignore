@@ -1,0 +1,61 @@
+# Terraform
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfvars
+!**/*.tfvars.example
+**/.terraform/
+**/.terraform.lock.hcl
+**/crash.log
+**/override.tf
+**/override.tf.json
+**/*_override.tf
+**/*_override.tf.json
+
+# Резервные копии конфигурации
+*.backup.*
+*.bak
+
+
+# Yandex Cloud credentials
+.authorized_key.json
+~/.authorized_key.json
+credentials.env
+*credentials*.env
+
+# Yandex Cloud service account keys
+**/.authorized_key.json
+infrastructure/.authorized_key.json
+~/.authorized_key.json
+**/credentials.env
+
+# Секретные файлы конфигурации backend
+backend-secrets.tfvars
+**/backend-secrets.tfvars
+!backend-secrets.tfvars.example
+!**/backend-secrets.tfvars.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Временные файлы с секретами
+ss
+**/ss
+*.key
+*.json.key
+# gitignore для app-test-web
+/infrastructure/app-test-web/.gitignore
+/infrastructure/app-test-web/.git
+
+# CI/CD workflow для приложения (будет размещен в репозитории app-test-web)
+.github/workflows/buildanddeploy.yaml
+#
+# Obsidian directory
+.obsidian/ 

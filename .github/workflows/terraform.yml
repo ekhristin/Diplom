@@ -1,0 +1,903 @@
+name: Terraform
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'infrastructure/**'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'infrastructure/**'
+  workflow_dispatch:
+
+env:
+  # Переменная для управления развертыванием инфраструктуры
+  # 'true' - развертttesttest4ывание включено (terraform apply)
+  # 'false' - удаление инфраструктуры (terraform destroy)
+  UP_INF: 'true' # 'false'/'true'
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Check deployment flag
+        id: check_flag
+        run: |
+          UP_INF_VALUE="${{ env.UP_INF }}"
+          if [ "$UP_INF_VALUE" = "true" ]; then
+            echo "Deployment enabled: Up_inf = true (terraform apply)"
+            echo "deploy=true" >> $GITHUB_OUTPUT
+            echo "action=apply" >> $GITHUB_OUTPUT
+          else
+            echo "Deployment disabled: Up_inf = false (terraform destroy)"
+            echo "deploy=false" >> $GITHUB_OUTPUT
+            echo "action=destroy" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.0
+      
+      - name: Configure Yandex Cloud credentials
+        env:
+          YC_SERVICE_ACCOUNT_KEY: ${{ secrets.YC_SERVICE_ACCOUNT_KEY }}
+        run: |
+          mkdir -p ~/.config
+          printf '%s\n' "$YC_SERVICE_ACCOUNT_KEY" > ~/.config/yc_sa_key.json
+          chmod 600 ~/.config/yc_sa_key.json
+          echo "YC_SERVICE_ACCOUNT_KEY_FILE=$HOME/.config/yc_sa_key.json" >> $GITHUB_ENV
+      
+      - name: Configure Terraform backend credentials
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+      
+      - name: Configure Terraform variables
+        run: |
+          # Обязательные переменные из terraform.tfvars
+          echo "TF_VAR_folder_id=${{ secrets.TF_VAR_folder_id }}" >> $GITHUB_ENV
+          # Опциональные переменные (могут быть пустыми, используются значения по умолчанию из variables.tf)
+          if [ -n "${{ secrets.TF_VAR_cloud_id }}" ]; then
+            echo "TF_VAR_cloud_id=${{ secrets.TF_VAR_cloud_id }}" >> $GITHUB_ENV
+          fi
+          if [ -n "${{ secrets.TF_VAR_environment }}" ]; then
+            echo "TF_VAR_environment=${{ secrets.TF_VAR_environment }}" >> $GITHUB_ENV
+          else
+            echo "TF_VAR_environment=dev" >> $GITHUB_ENV
+          fi
+          if [ -n "${{ secrets.TF_VAR_project_name }}" ]; then
+            echo "TF_VAR_project_name=${{ secrets.TF_VAR_project_name }}" >> $GITHUB_ENV
+          else
+            echo "TF_VAR_project_name=diplom" >> $GITHUB_ENV
+          fi
+          # service_account_key_file оставляем пустым для CI/CD, будет использована переменная окружения YC_SERVICE_ACCOUNT_KEY_FILE
+          echo "TF_VAR_service_account_key_file=" >> $GITHUB_ENV
+      
+      - name: Terraform Init
+        working-directory: ./infrastructure
+        run: terraform init
+      
+      - name: Terraform Validate
+        if: steps.check_flag.outputs.action == 'apply'
+        working-directory: ./infrastructure
+        run: terraform validate
+      
+      - name: Terraform Plan
+        if: steps.check_flag.outputs.action == 'apply'
+        working-directory: ./infrastructure
+        run: terraform plan -no-color
+        continue-on-error: true
+      
+      - name: Terraform Apply
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        working-directory: ./infrastructure
+        run: terraform apply -auto-approve -no-color
+      
+      - name: Get Kubernetes cluster information
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        id: k8s_info
+        working-directory: ./infrastructure
+        run: |
+          CLUSTER_ID=$(terraform output -raw k8s_cluster_id)
+          CLUSTER_NAME=$(terraform output -raw k8s_cluster_name)
+          CLUSTER_ENDPOINT=$(terraform output -raw k8s_cluster_endpoint)
+          echo "cluster_id=$CLUSTER_ID" >> $GITHUB_OUTPUT
+          echo "cluster_name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
+          echo "cluster_endpoint=$CLUSTER_ENDPOINT" >> $GITHUB_OUTPUT
+          echo "K8S_CLUSTER_ID=$CLUSTER_ID" >> $GITHUB_ENV
+          echo "K8S_CLUSTER_NAME=$CLUSTER_NAME" >> $GITHUB_ENV
+          echo "K8S_CLUSTER_ENDPOINT=$CLUSTER_ENDPOINT" >> $GITHUB_ENV
+      
+      - name: Setup kubectl
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+      
+      - name: Setup Yandex Cloud CLI
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        run: |
+          echo "Установка Yandex Cloud CLI..."
+          curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
+          export PATH=$PATH:$HOME/yandex-cloud/bin
+          echo "$HOME/yandex-cloud/bin" >> $GITHUB_PATH
+          yc version
+      
+      - name: Configure Yandex Cloud CLI
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        run: |
+          export PATH=$PATH:$HOME/yandex-cloud/bin
+          yc config set service-account-key $HOME/.config/yc_sa_key.json
+          yc config set folder-id ${{ secrets.TF_VAR_folder_id }}
+      
+      - name: Get kubeconfig
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        run: |
+          export PATH=$PATH:$HOME/yandex-cloud/bin
+          mkdir -p $HOME/.kube
+          KUBECONFIG_PATH="$HOME/.kube/config"
+          yc managed-kubernetes cluster get-credentials ${{ steps.k8s_info.outputs.cluster_id }} --external --kubeconfig "$KUBECONFIG_PATH"
+          chmod 600 "$KUBECONFIG_PATH"
+          # Устанавливаем KUBECONFIG с абсолютным путем для всех последующих шагов
+          echo "KUBECONFIG=$KUBECONFIG_PATH" >> $GITHUB_ENV
+          echo "✓ Kubeconfig сохранен в $KUBECONFIG_PATH"
+          # Проверяем, что файл создан и содержит данные
+          if [ -f "$KUBECONFIG_PATH" ]; then
+            echo "✓ Файл kubeconfig существует"
+            # Проверяем, что файл не пустой
+            if [ -s "$KUBECONFIG_PATH" ]; then
+              echo "✓ Файл kubeconfig содержит данные"
+            else
+              echo "::error::Файл kubeconfig пуст"
+              exit 1
+            fi
+          else
+            echo "::error::Файл kubeconfig не был создан"
+            exit 1
+          fi
+      
+      - name: Verify Kubernetes connection
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        run: |
+          echo "Проверка подключения к Kubernetes кластеру..."
+          
+          # Устанавливаем KUBECONFIG с fallback
+          if [ -z "$KUBECONFIG" ]; then
+            export KUBECONFIG="$HOME/.kube/config"
+          fi
+          
+          echo "Используется KUBECONFIG: $KUBECONFIG"
+          
+          # Проверяем наличие файла
+          if [ ! -f "$KUBECONFIG" ]; then
+            echo "::error::Файл kubeconfig не найден: $KUBECONFIG"
+            echo "Проверяем альтернативные пути..."
+            if [ -f "$HOME/.kube/config" ]; then
+              export KUBECONFIG="$HOME/.kube/config"
+              echo "Найден kubeconfig в $HOME/.kube/config"
+            else
+              echo "::error::Kubeconfig не найден ни в одном из ожидаемых мест"
+              exit 1
+            fi
+          fi
+          
+          # Проверяем подключение
+          echo "Проверка подключения к кластеру..."
+          kubectl cluster-info
+          kubectl get nodes
+          echo "✓ Подключение к кластеру успешно установлено"
+      
+      
+      - name: Setup Ingress Controller (nginx)
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
+        run: |
+          export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+          echo "Установка Ingress Controller (nginx)..."
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.1/deploy/static/provider/cloud/deploy.yaml
+          echo "Ожидание готовности Ingress Controller..."
+          kubectl wait --namespace ingress-nginx \
+            --for=condition=ready pod \
+            --selector=app.kubernetes.io/component=controller \
+            --timeout=300s || echo "Ingress Controller может быть еще не готов"
+          
+          echo "Ожидание назначения внешнего IP для Ingress Controller..."
+          for i in {1..30}; do
+            INGRESS_IP=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+            if [ -n "$INGRESS_IP" ]; then
+              echo "✓ Ingress Controller получил внешний IP: $INGRESS_IP"
+              echo "INGRESS_IP=$INGRESS_IP" >> $GITHUB_ENV
+              break
+            fi
+            echo "Ожидание внешнего IP... ($i/30)"
+            sleep 10
+          done
+          
+          if [ -z "$INGRESS_IP" ]; then
+            echo "⚠️  Внешний IP еще не назначен, но продолжаем установку"
+            echo ""
+            echo "Проверка событий сервиса для диагностики:"
+            kubectl describe service ingress-nginx-controller -n ingress-nginx | grep -A 10 "Events:" || echo "События не найдены"
+            echo ""
+            echo "⚠️  Если видите ошибку PermissionDenied, убедитесь, что Service Account кластера имеет роль 'editor' в папке"
+            echo "   Выполните: terraform apply для обновления прав Service Account"
+          fi
+          
+          echo "Статус Ingress Controller:"
+          kubectl get service ingress-nginx-controller -n ingress-nginx
+          echo "✓ Ingress Controller установлен"
+      
+      - name: Install kube-prometheus stack
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
+        run: |
+          export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+          echo "Установка kube-prometheus stack..."
+          
+          # Клонируем репозиторий kube-prometheus для получения манифестов
+          KUBE_PROMETHEUS_VERSION="v0.16.0"
+          echo "Клонирование kube-prometheus версии $KUBE_PROMETHEUS_VERSION..."
+          git clone --depth 1 --branch $KUBE_PROMETHEUS_VERSION https://github.com/prometheus-operator/kube-prometheus.git /tmp/kube-prometheus || {
+            echo "Не удалось клонировать версию $KUBE_PROMETHEUS_VERSION, используем main ветку..."
+            git clone --depth 1 https://github.com/prometheus-operator/kube-prometheus.git /tmp/kube-prometheus
+          }
+          
+          # Применяем setup манифесты (CRDs и namespace)
+          echo "Применение setup манифестов (CRDs)..."
+          kubectl apply --server-side -f /tmp/kube-prometheus/manifests/setup
+          
+          # Ожидание готовности CRDs
+          echo "Ожидание готовности CRDs..."
+          sleep 15
+          kubectl wait \
+            --for condition=Established \
+            --all CustomResourceDefinition \
+            --timeout=300s || echo "Некоторые CRDs могут быть еще не готовы"
+          
+          # Применение остальных манифестов
+          echo "Применение основных манифестов..."
+          kubectl apply -f /tmp/kube-prometheus/manifests/
+          
+          echo "✓ kube-prometheus stack установлен"
+      
+      - name: Wait for kube-prometheus components
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        run: |
+          echo "Ожидание готовности компонентов kube-prometheus..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=grafana -n monitoring --timeout=300s
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=prometheus -n monitoring --timeout=300s
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=alertmanager -n monitoring --timeout=300s
+          echo "✓ Компоненты kube-prometheus готовы"
+      
+      - name: Setup Ingress for Grafana
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
+        run: |
+          export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+          echo "Настройка Ingress для Grafana..."
+          
+          # Проверяем, что сервис Grafana существует
+          echo "Проверка сервиса Grafana..."
+          kubectl get service grafana -n monitoring || echo "⚠️  Сервис Grafana не найден"
+          
+          echo "Удаление переменных окружения Grafana для работы на корневом пути..."
+          kubectl set env deployment/grafana -n monitoring GF_SERVER_SERVE_FROM_SUB_PATH- GF_SERVER_ROOT_URL- 2>/dev/null || echo "Переменные окружения не найдены или уже удалены"
+          
+          # Ждем перезапуска подов Grafana после изменения переменных окружения
+          if kubectl get deployment grafana -n monitoring &>/dev/null; then
+            echo "Ожидание перезапуска подов Grafana..."
+            sleep 10
+            kubectl rollout status deployment/grafana -n monitoring --timeout=120s || echo "Grafana может быть еще не готова"
+          fi
+          
+          # Удаляем существующие Ingress, которые могут конфликтовать с путем "/"
+          echo "Удаление существующих Ingress, которые могут конфликтовать..."
+          kubectl delete ingress grafana-ingress -n monitoring 2>/dev/null || echo "Ingress для Grafana не найден"
+          kubectl delete ingress app-test-web-ingress -n app-test-web 2>/dev/null || echo "Ingress для приложения не найден"
+          
+          # Удаляем NetworkPolicy для Grafana, так как она блокирует доступ от Ingress Controller
+          # NetworkPolicy можно настроить позже вручную, если потребуется
+          echo "Удаление NetworkPolicy для Grafana (блокирует доступ от Ingress Controller)..."
+          kubectl delete networkpolicy grafana -n monitoring 2>/dev/null || echo "NetworkPolicy не найдена или уже удалена"
+          
+          # Создаем Ingress для Grafana на корневом пути /
+          echo "Создание Ingress для Grafana на пути /..."
+          # НЕ используем rewrite-target для пути /, так как путь уже корневой
+          cat <<EOF | kubectl apply -f -
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: grafana-ingress
+            namespace: monitoring
+            annotations:
+              nginx.ingress.kubernetes.io/ssl-redirect: "false"
+              nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+              nginx.ingress.kubernetes.io/proxy-connect-timeout: "600"
+          spec:
+            ingressClassName: nginx
+            rules:
+            - http:
+                paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: grafana
+                      port:
+                        number: 3000
+          EOF
+          
+          # Проверяем, что Ingress создан
+          echo "Проверка создания Ingress..."
+          kubectl get ingress grafana-ingress -n monitoring
+          
+          # Получаем внешний IP Ingress Controller для формирования ссылки
+          INGRESS_IP=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          if [ -z "$INGRESS_IP" ]; then
+            CLUSTER_ENDPOINT="${{ steps.k8s_info.outputs.cluster_endpoint }}"
+            INGRESS_IP=$(echo "$CLUSTER_ENDPOINT" | sed 's|https\?://||' | sed 's|:.*||')
+          fi
+          
+          echo "✓ Ingress для Grafana настроен, доступен по адресу: http://${INGRESS_IP}/"
+      
+      - name: Get Container Registry information
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        id: registry_info
+        working-directory: ./infrastructure
+        run: |
+          REGISTRY_ID=$(terraform output -raw registry_id)
+          REGISTRY_NAME=$(terraform output -raw registry_name)
+          echo "registry_id=$REGISTRY_ID" >> $GITHUB_OUTPUT
+          echo "registry_name=$REGISTRY_NAME" >> $GITHUB_OUTPUT
+          echo "REGISTRY_ID=$REGISTRY_ID" >> $GITHUB_ENV
+          echo "REGISTRY_NAME=$REGISTRY_NAME" >> $GITHUB_ENV
+          echo "✓ Container Registry ID: $REGISTRY_ID"
+          echo "✓ Container Registry Name: $REGISTRY_NAME"
+      
+      - name: Setup Docker Buildx
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+      
+      - name: Authenticate to Yandex Container Registry
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        run: |
+          export PATH=$PATH:$HOME/yandex-cloud/bin
+          echo "Авторизация в Yandex Container Registry..."
+          # Получаем IAM токен для авторизации в Docker
+          IAM_TOKEN=$(yc iam create-token)
+          echo "$IAM_TOKEN" | docker login --username iam --password-stdin cr.yandex
+          echo "✓ Авторизация в Container Registry выполнена"
+      
+      - name: Build and push application image
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        run: |
+          echo "Клонирование репозитория приложения..."
+          # Используем HTTPS для публичного репозитория
+          git clone https://github.com/ekhristin/app-test-web.git app-test-web || {
+            echo "::error::Не удалось клонировать репозиторий"
+            exit 1
+          }
+          cd app-test-web
+          
+          echo "Проверка наличия Dockerfile..."
+          # Проверяем наличие Dockerfile
+          if [ ! -f "Dockerfile" ]; then
+            echo "::warning::Dockerfile не найден, создаем базовый Dockerfile..."
+            echo "FROM nginx:alpine" > Dockerfile
+            echo "COPY . /usr/share/nginx/html" >> Dockerfile
+            echo "EXPOSE 80" >> Dockerfile
+          fi
+          
+          # Формируем имя образа для Yandex Container Registry
+          IMAGE_NAME="cr.yandex/${{ steps.registry_info.outputs.registry_id }}/app-test-web:latest"
+          echo "Сборка Docker образа: $IMAGE_NAME"
+          
+          # Сборка образа
+          docker build -t $IMAGE_NAME .
+          
+          echo "Загрузка образа в Yandex Container Registry..."
+          docker push $IMAGE_NAME
+          
+          echo "✓ Образ успешно загружен в Container Registry: $IMAGE_NAME"
+          echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
+      
+      - name: Create registry secret in Kubernetes
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        run: |
+          export PATH=$PATH:$HOME/yandex-cloud/bin
+          echo "Создание Secret для авторизации в Container Registry..."
+          # Получаем IAM токен
+          IAM_TOKEN=$(yc iam create-token)
+          # Создаем Docker config для авторизации
+          DOCKER_CONFIG=$(echo -n "iam:$IAM_TOKEN" | base64)
+          # Создаем Secret в namespace app-test-web
+          kubectl create namespace app-test-web --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret docker-registry yandex-registry-secret \
+            --docker-server=cr.yandex \
+            --docker-username=iam \
+            --docker-password="$IAM_TOKEN" \
+            --namespace=app-test-web \
+            --dry-run=client -o yaml | kubectl apply -f -
+          echo "✓ Secret для Container Registry создан"
+      
+      - name: Deploy application to Kubernetes
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
+        run: |
+          export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+          echo "Деплой приложения в Kubernetes..."
+          
+          # Удаляем существующий Ingress для приложения, если он есть (чтобы избежать конфликтов)
+          echo "Удаление существующего Ingress для приложения (если есть)..."
+          kubectl delete ingress app-test-web-ingress -n app-test-web 2>/dev/null || echo "Ingress для приложения не найден, создаем новый"
+          
+          # Имя образа из Container Registry
+          IMAGE_NAME="cr.yandex/${{ steps.registry_info.outputs.registry_id }}/app-test-web:latest"
+          
+          # Создание манифестов для деплоя с использованием образа из Container Registry
+          # ВАЖНО: В репозитории app-test-web нужно исправить nginx.conf
+          # Изменить location /app на location /app/ с alias вместо root
+          cat <<EOF | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: app-test-web
+            namespace: app-test-web
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: app-test-web
+            template:
+              metadata:
+                labels:
+                  app: app-test-web
+              spec:
+                imagePullSecrets:
+                - name: yandex-registry-secret
+                containers:
+                - name: app-test-web
+                  image: ${IMAGE_NAME}
+                  ports:
+                  - containerPort: 80
+                  resources:
+                    requests:
+                      memory: "128Mi"
+                      cpu: "100m"
+                    limits:
+                      memory: "256Mi"
+                      cpu: "200m"
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: app-test-web
+            namespace: app-test-web
+          spec:
+            type: ClusterIP
+            selector:
+              app: app-test-web
+            ports:
+            - port: 80
+              targetPort: 80
+          ---
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: app-test-web-ingress
+            namespace: app-test-web
+            annotations:
+              nginx.ingress.kubernetes.io/ssl-redirect: "false"
+              nginx.ingress.kubernetes.io/rewrite-target: /\$1
+              nginx.ingress.kubernetes.io/use-regex: "true"
+          spec:
+            ingressClassName: nginx
+            rules:
+            - http:
+                paths:
+                - path: /app(.*)
+                  pathType: ImplementationSpecific
+                  backend:
+                    service:
+                      name: app-test-web
+                      port:
+                        number: 80
+          EOF
+          
+          echo "Ожидание готовности приложения..."
+          kubectl wait --for=condition=available deployment/app-test-web -n app-test-web --timeout=300s || echo "Приложение может быть еще не готово"
+          echo "✓ Приложение развернуто"
+          
+          # Проверка статуса Ingress для приложения
+          echo "Проверка статуса Ingress для приложения..."
+          kubectl get ingress app-test-web-ingress -n app-test-web
+          
+          # Проверяем, что сервис приложения доступен
+          echo "Проверка доступности сервиса приложения..."
+          kubectl get service app-test-web -n app-test-web
+          kubectl get endpoints app-test-web -n app-test-web
+          
+          # Проверяем поды приложения
+          echo "Проверка подов приложения..."
+          kubectl get pods -n app-test-web -l app=app-test-web
+          
+          # Проверяем логи подов приложения для диагностики
+          echo "Последние логи приложения (первые 20 строк):"
+          kubectl logs -n app-test-web -l app=app-test-web --tail=20 || echo "Не удалось получить логи"
+          
+          # Проверяем конфигурацию Ingress Controller
+          echo ""
+          echo "Проверка конфигурации Ingress Controller..."
+          kubectl get ingress --all-namespaces
+          
+          # Проверяем конфигурацию nginx в Ingress Controller
+          echo ""
+          echo "Проверка конфигурации nginx в Ingress Controller..."
+          INGRESS_POD=$(kubectl get pods -n ingress-nginx -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          if [ -n "$INGRESS_POD" ]; then
+            echo "Проверка конфигурации nginx для приложения:"
+            kubectl exec -n ingress-nginx "$INGRESS_POD" -- cat /etc/nginx/nginx.conf | grep -A 10 "app-test-web" || echo "Конфигурация для app-test-web не найдена"
+            echo ""
+            echo "Проверка конфигурации nginx для Grafana:"
+            kubectl exec -n ingress-nginx "$INGRESS_POD" -- cat /etc/nginx/nginx.conf | grep -A 10 "grafana" || echo "Конфигурация для grafana не найдена"
+          fi
+      
+      - name: Diagnostic information
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
+        run: |
+          export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🔍 ДИАГНОСТИЧЕСКАЯ ИНФОРМАЦИЯ"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          echo ""
+          echo "📊 Статус Ingress Controller:"
+          kubectl get service ingress-nginx-controller -n ingress-nginx
+          INGRESS_IP=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          if [ -z "$INGRESS_IP" ]; then
+            echo "⚠️  Внешний IP для Ingress Controller еще не назначен"
+            echo "   Это может занять несколько минут в Yandex Cloud"
+          else
+            echo "✓ Внешний IP Ingress Controller: $INGRESS_IP"
+          fi
+          
+          echo ""
+          echo "📊 Статус Ingress ресурсов:"
+          echo "Grafana Ingress:"
+          kubectl get ingress grafana-ingress -n monitoring || echo "  Ingress не найден"
+          echo ""
+          echo "Application Ingress:"
+          kubectl get ingress app-test-web-ingress -n app-test-web || echo "  Ingress не найден"
+          
+          echo ""
+          echo "📊 Статус сервисов:"
+          echo "Grafana Service:"
+          kubectl get service grafana -n monitoring || echo "  Сервис не найден"
+          echo ""
+          echo "Application Service:"
+          kubectl get service app-test-web -n app-test-web || echo "  Сервис не найден"
+          
+          echo ""
+          echo "📊 Статус подов:"
+          echo "Grafana Pods:"
+          kubectl get pods -n monitoring -l app.kubernetes.io/name=grafana || echo "  Поды не найдены"
+          echo ""
+          echo "Application Pods:"
+          kubectl get pods -n app-test-web -l app=app-test-web || echo "  Поды не найдены"
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      
+      - name: Wait for Ingress to be ready
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
+        run: |
+          export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+          echo "Ожидание готовности Ingress Controller..."
+          echo "⚠️  В Yandex Cloud назначение внешнего IP для LoadBalancer может занять до 10-15 минут"
+          
+          # Ждем получения внешнего IP для Ingress Controller (увеличиваем время ожидания)
+          INGRESS_IP=""
+          MAX_ATTEMPTS=60  # 60 попыток = 10 минут
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            INGRESS_IP=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+            if [ -n "$INGRESS_IP" ] && [ "$INGRESS_IP" != "<pending>" ] && [ "$INGRESS_IP" != "null" ]; then
+              echo "✓ Ingress Controller получил внешний IP: $INGRESS_IP"
+              echo "INGRESS_IP=$INGRESS_IP" >> $GITHUB_ENV
+              break
+            fi
+            
+            # Показываем статус каждые 5 попыток
+            if [ $((i % 5)) -eq 0 ]; then
+              echo "Ожидание внешнего IP для Ingress Controller... ($i/$MAX_ATTEMPTS)"
+              echo "Текущий статус сервиса:"
+              kubectl get service ingress-nginx-controller -n ingress-nginx -o wide || true
+            fi
+            sleep 10
+          done
+          
+          # Если IP все еще не получен, выводим предупреждение, но продолжаем
+          if [ -z "$INGRESS_IP" ] || [ "$INGRESS_IP" == "<pending>" ] || [ "$INGRESS_IP" == "null" ]; then
+            echo "⚠️  Внешний IP для LoadBalancer еще не назначен после $MAX_ATTEMPTS попыток"
+            echo "   Это нормально для Yandex Cloud - назначение IP может занять до 15-20 минут"
+            echo "   Проверьте статус позже командой:"
+            echo "   kubectl get service ingress-nginx-controller -n ingress-nginx"
+            echo ""
+            echo "   Или используйте адрес кластера для доступа:"
+            CLUSTER_ENDPOINT="${{ steps.k8s_info.outputs.cluster_endpoint }}"
+            CLUSTER_HOST=$(echo "$CLUSTER_ENDPOINT" | sed 's|https\?://||' | sed 's|:.*||')
+            echo "   Адрес кластера: $CLUSTER_HOST"
+            echo "INGRESS_IP=$CLUSTER_HOST" >> $GITHUB_ENV
+          fi
+      
+      - name: Get deployment information and credentials
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        id: deployment_info
+        env:
+          KUBECONFIG: ${{ env.KUBECONFIG }}
+        run: |
+          export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+          echo "Получение информации о развертывании..."
+          
+          # Получаем адрес для доступа
+          # Проверяем, есть ли реальный внешний IP LoadBalancer
+          INGRESS_IP_CHECK=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          
+          if [ -n "$INGRESS_IP_CHECK" ] && [ "$INGRESS_IP_CHECK" != "<pending>" ] && [ "$INGRESS_IP_CHECK" != "null" ]; then
+            CLUSTER_HOST="$INGRESS_IP_CHECK"
+            echo "✓ Используется внешний IP LoadBalancer: $CLUSTER_HOST"
+          elif [ -n "${{ env.INGRESS_IP }}" ]; then
+            CLUSTER_HOST="${{ env.INGRESS_IP }}"
+            echo "Используется адрес из окружения: $CLUSTER_HOST"
+          else
+            # Используем адрес кластера как fallback
+            CLUSTER_ENDPOINT="${{ steps.k8s_info.outputs.cluster_endpoint }}"
+            CLUSTER_HOST=$(echo "$CLUSTER_ENDPOINT" | sed 's|https\?://||' | sed 's|:.*||')
+            echo "⚠️  Используется адрес кластера (внешний IP LoadBalancer еще не назначен): $CLUSTER_HOST"
+          fi
+          
+          # Получаем учетные данные Grafana из Secret
+          echo "Получение учетных данных Grafana..."
+          GRAFANA_USERNAME="admin"
+          
+          # Пытаемся получить пароль из различных возможных Secret
+          GRAFANA_PASSWORD=""
+          
+          # Вариант 1: Secret с именем grafana-admin
+          GRAFANA_PASSWORD=$(kubectl get secret grafana-admin -n monitoring -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+          
+          # Вариант 2: Secret с меткой app.kubernetes.io/name=grafana
+          if [ -z "$GRAFANA_PASSWORD" ]; then
+            GRAFANA_PASSWORD=$(kubectl get secret -n monitoring -l app.kubernetes.io/name=grafana -o jsonpath='{.items[0].data.admin-password}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+          fi
+          
+          # Вариант 3: Ищем любой Secret в namespace monitoring с admin-password
+          if [ -z "$GRAFANA_PASSWORD" ]; then
+            for secret in $(kubectl get secrets -n monitoring -o name 2>/dev/null); do
+              GRAFANA_PASSWORD=$(kubectl get $secret -n monitoring -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+              if [ -n "$GRAFANA_PASSWORD" ]; then
+                break
+              fi
+            done
+          fi
+          
+          # Если пароль не найден, используем значение по умолчанию для kube-prometheus
+          if [ -z "$GRAFANA_PASSWORD" ]; then
+            GRAFANA_PASSWORD="admin"
+            echo "⚠️  Пароль Grafana не найден в Secrets, используется значение по умолчанию: admin"
+          else
+            echo "✓ Пароль Grafana успешно получен из Secret"
+          fi
+          
+          # Формируем ссылки (всегда через LoadBalancer, без NodePort)
+          APP_URL="http://${CLUSTER_HOST}/app"
+          GRAFANA_URL="http://${CLUSTER_HOST}/"
+          
+          # Сохраняем в outputs для использования в следующем шаге
+          echo "app_url=$APP_URL" >> $GITHUB_OUTPUT
+          echo "grafana_url=$GRAFANA_URL" >> $GITHUB_OUTPUT
+          echo "grafana_username=$GRAFANA_USERNAME" >> $GITHUB_OUTPUT
+          echo "grafana_password=$GRAFANA_PASSWORD" >> $GITHUB_OUTPUT
+          echo "cluster_host=$CLUSTER_HOST" >> $GITHUB_OUTPUT
+      
+      - name: Display deployment information
+        if: steps.check_flag.outputs.action == 'apply' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        run: |
+          echo ""
+          echo "╔════════════════════════════════════════════════════════════════╗"
+          echo "║           РАЗВЕРТЫВАНИЕ УСПЕШНО ЗАВЕРШЕНО                     ║"
+          echo "╚════════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📱 ПРИЛОЖЕНИЕ"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🔗 Ссылка для доступа: ${{ steps.deployment_info.outputs.app_url }}"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 GRAFANA"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🔗 Ссылка для доступа: ${{ steps.deployment_info.outputs.grafana_url }}"
+          echo "👤 Имя пользователя: ${{ steps.deployment_info.outputs.grafana_username }}"
+          echo "🔑 Пароль: ${{ steps.deployment_info.outputs.grafana_password }}"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "ℹ️  ДОПОЛНИТЕЛЬНАЯ ИНФОРМАЦИЯ"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🌐 Адрес для доступа: ${{ steps.deployment_info.outputs.cluster_host }}"
+          echo "📦 Имя кластера: ${{ steps.k8s_info.outputs.cluster_name }}"
+          echo "🆔 ID кластера: ${{ steps.k8s_info.outputs.cluster_id }}"
+          echo ""
+          INGRESS_IP_CHECK=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          INGRESS_TYPE=$(kubectl get service ingress-nginx-controller -n ingress-nginx -o jsonpath='{.spec.type}' 2>/dev/null || echo "")
+          
+          echo "Тип сервиса Ingress Controller: $INGRESS_TYPE"
+          
+          if [ -z "$INGRESS_IP_CHECK" ] || [ "$INGRESS_IP_CHECK" == "<pending>" ] || [ "$INGRESS_IP_CHECK" == "null" ]; then
+            echo "⚠️  ВНИМАНИЕ: Внешний IP для LoadBalancer еще не назначен."
+            echo "   В Yandex Cloud это может занять до 15-20 минут после создания сервиса."
+            echo "   Проверьте статус командой:"
+            echo "   kubectl get service ingress-nginx-controller -n ingress-nginx"
+            echo ""
+            echo "   После назначения IP, приложение будет доступно по адресу:"
+            echo "   http://<EXTERNAL-IP>/app"
+            echo "   Grafana будет доступна по адресу:"
+            echo "   http://<EXTERNAL-IP>/"
+            echo ""
+          else
+            echo "✓ Внешний IP LoadBalancer назначен: $INGRESS_IP_CHECK"
+          fi
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "✅ Все компоненты успешно развернуты!"
+          echo ""
+          
+          # Также выводим в формате для GitHub Actions summary
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # 🎉 Развертывание успешно завершено
+          
+          ## 📱 Приложение
+          
+          **Ссылка для доступа:** [${{ steps.deployment_info.outputs.app_url }}](${{ steps.deployment_info.outputs.app_url }})
+          
+          ## 📊 Grafana
+          
+          **Ссылка для доступа:** [${{ steps.deployment_info.outputs.grafana_url }}](${{ steps.deployment_info.outputs.grafana_url }})
+          
+          **Учетные данные:**
+          - **Имя пользователя:** \`${{ steps.deployment_info.outputs.grafana_username }}\`
+          - **Пароль:** \`${{ steps.deployment_info.outputs.grafana_password }}\`
+          
+          ## ℹ️ Дополнительная информация
+          
+          - **Адрес кластера:** \`${{ steps.deployment_info.outputs.cluster_host }}\`
+          - **Имя кластера:** \`${{ steps.k8s_info.outputs.cluster_name }}\`
+          - **ID кластера:** \`${{ steps.k8s_info.outputs.cluster_id }}\`
+          
+          ---
+          
+          ✅ Все компоненты успешно развернуты и готовы к использованию!
+          EOF
+      
+      - name: Get registry information for cleanup
+        if: steps.check_flag.outputs.action == 'destroy' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        id: registry_cleanup_info
+        working-directory: ./infrastructure
+        run: |
+          echo "Получение информации о Container Registry для очистки..."
+          REGISTRY_ID=$(terraform output -raw registry_id 2>/dev/null || echo "")
+          REGISTRY_NAME=$(terraform output -raw registry_name 2>/dev/null || echo "")
+          
+          if [ -n "$REGISTRY_ID" ]; then
+            echo "registry_id=$REGISTRY_ID" >> $GITHUB_OUTPUT
+            echo "REGISTRY_ID=$REGISTRY_ID" >> $GITHUB_ENV
+            echo "✓ Container Registry ID: $REGISTRY_ID"
+          fi
+          
+          if [ -n "$REGISTRY_NAME" ]; then
+            echo "registry_name=$REGISTRY_NAME" >> $GITHUB_OUTPUT
+            echo "REGISTRY_NAME=$REGISTRY_NAME" >> $GITHUB_ENV
+            echo "✓ Container Registry Name: $REGISTRY_NAME"
+          fi
+          
+          if [ -z "$REGISTRY_ID" ] && [ -z "$REGISTRY_NAME" ]; then
+            echo "⚠️  Информация о Container Registry не найдена в Terraform outputs"
+            echo "   Возможно, registry уже удален или не был создан"
+          fi
+      
+      - name: Clean up Container Registry images
+        if: steps.check_flag.outputs.action == 'destroy' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && steps.registry_cleanup_info.outputs.registry_id != ''
+        run: |
+          export PATH=$PATH:$HOME/yandex-cloud/bin
+          echo "Очистка образов из Container Registry перед удалением..."
+          
+          REGISTRY_ID="${{ steps.registry_cleanup_info.outputs.registry_id }}"
+          
+          if [ -z "$REGISTRY_ID" ]; then
+            echo "⚠️  Registry ID не найден, пропускаем очистку"
+            exit 0
+          fi
+          
+          echo "Получение списка образов в registry: $REGISTRY_ID"
+          
+          # Получаем список всех образов в registry
+          IMAGES=$(yc container image list --registry-id "$REGISTRY_ID" --format json 2>/dev/null || echo "[]")
+          
+          if [ "$IMAGES" != "[]" ] && [ -n "$IMAGES" ]; then
+            echo "Найдено образов для удаления:"
+            echo "$IMAGES" | jq -r '.[] | "  - \(.id)"' 2>/dev/null || echo "$IMAGES"
+            
+            # Удаляем каждый образ
+            if command -v jq &> /dev/null; then
+              # Используем jq для парсинга JSON
+              IMAGE_IDS=$(echo "$IMAGES" | jq -r '.[].id' | tr '\n' ' ')
+              for image_id in $IMAGE_IDS; do
+                if [ -n "$image_id" ] && [ "$image_id" != "null" ]; then
+                  echo "Удаление образа: $image_id"
+                  yc container image delete "$image_id" --quiet 2>&1 || echo "⚠️  Не удалось удалить образ: $image_id"
+                fi
+              done
+            else
+              # Простой парсинг без jq
+              IMAGE_IDS=$(echo "$IMAGES" | grep -o '"id":"[^"]*"' | sed 's/"id":"\([^"]*\)"/\1/' | tr '\n' ' ')
+              for image_id in $IMAGE_IDS; do
+                if [ -n "$image_id" ]; then
+                  echo "Удаление образа: $image_id"
+                  yc container image delete "$image_id" --quiet 2>&1 || echo "⚠️  Не удалось удалить образ: $image_id"
+                fi
+              done
+            fi
+            
+            echo "✓ Очистка образов завершена"
+          else
+            echo "✓ Registry пуст, образы отсутствуют"
+          fi
+          
+          # Дополнительная проверка - пытаемся удалить все образы по имени registry
+          echo ""
+          echo "Проверка наличия оставшихся образов..."
+          sleep 2
+          REMAINING_IMAGES=$(yc container image list --registry-id "$REGISTRY_ID" --format json 2>/dev/null || echo "[]")
+          if [ "$REMAINING_IMAGES" != "[]" ] && [ -n "$REMAINING_IMAGES" ]; then
+            echo "⚠️  Обнаружены оставшиеся образы, повторная попытка удаления..."
+            if command -v jq &> /dev/null; then
+              REMAINING_IDS=$(echo "$REMAINING_IMAGES" | jq -r '.[].id' | tr '\n' ' ')
+              for image_id in $REMAINING_IDS; do
+                if [ -n "$image_id" ] && [ "$image_id" != "null" ]; then
+                  yc container image delete "$image_id" --quiet 2>&1 || true
+                fi
+              done
+            fi
+          fi
+          
+          echo "✓ Очистка Container Registry завершена"
+      
+      - name: Terraform Destroy
+        if: steps.check_flag.outputs.action == 'destroy' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        working-directory: ./infrastructure
+        run: terraform destroy -auto-approve -no-color
+      
+      - name: Infrastructure removal notice
+        if: steps.check_flag.outputs.action == 'destroy' && (github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master')
+        run: |
+          echo "::warning::Удаление инфраструктуры (terraform destroy) выполняется только для веток main/master"
+          echo "Текущая ветка: ${{ github.ref }}"
+          echo "Для удаления инфраструктуры выполните workflow в ветке main или master"
+
